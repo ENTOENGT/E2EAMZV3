@@ -418,6 +418,13 @@ th.bulk-col,td.bulk-col{width:34px;text-align:center;padding-left:10px;padding-r
 .bulk-bar .bulk-count{color:var(--ink)}
 .btn-del-solid.sm{padding:6px 13px;font-size:13px;border-radius:8px}
 .bulk-selall{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--ink-soft);cursor:pointer;user-select:none}
+/* ADDED (Req 3): FBA return disposition control */
+.disp-select{margin-top:5px;font-size:11px;font-weight:600;padding:2px 6px;border-radius:7px;border:1px solid var(--line);background:#fff;cursor:pointer}
+.disp-select.disp-sellable{color:var(--teal);border-color:var(--teal)}
+.disp-select.disp-bad{color:var(--bad);border-color:var(--bad)}
+.disp-badge{display:inline-block;margin-top:5px;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px}
+.disp-badge.disp-sellable{background:var(--teal-soft);color:var(--teal)}
+.disp-badge.disp-bad{background:#fdeceb;color:var(--bad)}
 .modal-body table{width:100%;border-collapse:collapse}
 .pm-modal-table{table-layout:auto;min-width:520px}
 .pm-modal-table th,.pm-modal-table td{padding:9px 12px;white-space:nowrap;vertical-align:middle;text-align:left}
@@ -558,6 +565,10 @@ function outRevenue(o){ return outSign(o) * (o.qty*o.price); }      // signed sa
 function outUnits(o){ return outSign(o) * o.qty; }                  // signed units
 function outCommission(o){ return outSign(o) * orderCommission(o); }// signed commission
 function isReturn(o){ return o && o.type==='return'; }
+// REQ 3: disposition of a return. Missing/empty => 'sellable' (backward-compatible).
+function returnDisposition(o){ return (o && o.disposition) ? o.disposition : 'sellable'; }
+// A return re-enters sellable stock only when its disposition is 'sellable'.
+function isSellableReturn(o){ return isReturn(o) && returnDisposition(o)==='sellable'; }
 function outTypeLabel(o){ return isReturn(o) ? 'Sales Return' : 'Sale'; }
 // ===== Amazon integration: source & fulfilment helpers =====
 // A row's `source` is 'manual' (typed in) or 'amazon' (synced from Seller Central).
@@ -684,7 +695,16 @@ function recomputeStock(){
   const key=(sku,wh)=>sku+'@@'+wh;
   const bump=(sku,wh,d)=>{ if(!sku||!wh)return; const k=key(sku,wh); map[k]=(map[k]||0)+d; };
   INWARD.forEach(r=>{ bump(r.sku, r.wh, r.qty); });               // inward adds (purchase + return)
-  OUTWARD.forEach(o=>{ bump(o.sku, o.wh, (o.type==='return'? o.qty : -o.qty)); }); // FEATURE 1: sale subtracts, return adds back
+  OUTWARD.forEach(o=>{
+    if(o.type==='return'){
+      // REQ 3: a returned unit only re-enters SELLABLE stock when its disposition is sellable.
+      // damaged / unsellable returns reverse the SALE (revenue) but are NOT added back to stock.
+      // A missing disposition is treated as 'sellable' (backward-compatible with existing returns).
+      if(isSellableReturn(o)) bump(o.sku, o.wh, o.qty);
+    } else {
+      bump(o.sku, o.wh, -o.qty);                                   // sale subtracts
+    }
+  });
   TRANSFERS.forEach(t=>{ bump(t.sku, t.from, -t.qty); bump(t.sku, t.to, t.qty); }); // move between warehouses
   STOCK.length=0; // clear old (removes orphan entries)
   Object.keys(map).forEach(k=>{
@@ -888,8 +908,8 @@ const NAV = [
   {group:'Overview', items:[{id:'dashboard', label:'Dashboard', icon:'grid'}]},
   {group:'Operations', items:[
     {id:'inward', label:'Inward', icon:'download'},
-    {id:'inventory', label:'Inventory', icon:'box'},
     {id:'outward', label:'Outward', icon:'upload'},
+    {id:'inventory', label:'Inventory', icon:'box'},
   ]},
   {group:'Insight', items:[
     {id:'finance', label:'Financials', icon:'trending'},
@@ -1626,6 +1646,41 @@ function amazonSyncMarkup(s){
     ${s.note?`<div style="font-size:12px;color:var(--ink-soft);max-width:340px">${esc(s.note)}</div>`:''}
   </div>`;
 }
+// REQ 3: change a return's disposition. sellable => stock added back; damaged/unsellable => not.
+// Persists in live mode, recomputes stock, and re-renders. Only meaningful for returns.
+function setReturnDisposition(id, disposition){
+  const o=OUTWARD.find(x=>x.id===id);
+  if(!o || !isReturn(o)){ return; }
+  if(!['sellable','damaged','unsellable'].includes(disposition)) return;
+  const apply=()=>{
+    if(window.LIVE && typeof liveSetDisposition==='function'){
+      liveSetDisposition(id, disposition)
+        .then(()=>{ toast(`Return marked ${disposition}`); renderSalesTab(); })
+        .catch(e=>{ toast((e&&e.message)||'Could not update disposition'); });
+    } else {
+      o.disposition=disposition; recomputeStock(); touchUpdated();
+      toast(`Return marked ${disposition}`); renderSalesTab();
+    }
+  };
+  // Warn when moving stock OUT of sellable (reduces available stock) or back IN.
+  const was=returnDisposition(o);
+  if(was==='sellable' && disposition!=='sellable'){
+    confirmProceed(`Mark this returned unit as ${disposition}? It will be removed from sellable stock for ${esc(o.sku)} in ${esc(o.wh)}.`, apply);
+  } else if(was!=='sellable' && disposition==='sellable'){
+    confirmProceed(`Mark this return sellable? ${o.qty} unit(s) of ${esc(o.sku)} will be added back to sellable stock in ${esc(o.wh)}.`, apply);
+  } else { apply(); }
+}
+// REQ 3: small per-return disposition control (admin = editable dropdown; else a badge).
+function dispositionControl(o){
+  const d=returnDisposition(o);
+  const labels={sellable:'Sellable',damaged:'Damaged',unsellable:'Unsellable'};
+  if(!isAdmin()){
+    const cls = d==='sellable'?'disp-sellable':'disp-bad';
+    return `<div><span class="disp-badge ${cls}">${labels[d]||d}</span></div>`;
+  }
+  const opt=v=>`<option value="${v}"${d===v?' selected':''}>${labels[v]}</option>`;
+  return `<div><select class="disp-select ${d==='sellable'?'disp-sellable':'disp-bad'}" title="Return condition — only Sellable adds stock back" data-onchange="setReturnDisposition('${o.id}',this.value)">${opt('sellable')}${opt('damaged')}${opt('unsellable')}</select></div>`;
+}
 function groupOutwardByWarehouse(out){
   const groups={};
   out.forEach(o=>{ (groups[o.wh]=groups[o.wh]||[]).push(o); });
@@ -1800,7 +1855,7 @@ function groupOutwardByReference(out){
         <thead><tr>${admin?bulkSelectAllCell('out',ids):''}<th>Type</th><th>SKU</th><th>Product</th><th>Channel</th><th>Warehouse</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th>${admin?'<th></th>':''}</tr></thead>
         <tbody>${g.map(o=>{const v=outRevenue(o), cm=outCommission(o); return `<tr class="${isReturn(o)?'row-return':''}">
           ${admin?bulkCheckboxCell('out',o.id):''}
-          <td>${isReturn(o)?'<span class="pill ret">Return</span>':'<span class="pill ok">Sale</span>'}</td>
+          <td>${isReturn(o)?('<span class="pill ret">Return</span>'+dispositionControl(o)):'<span class="pill ok">Sale</span>'}</td>
           <td class="sku-cell">${esc(o.sku)}</td>
           <td>${esc(prod(o.sku).name||'')}</td>
           <td><span class="tag ${channelClass(o.channel)}">${esc(o.channel)}</span> ${sourceBadge(o)}</td>
@@ -2772,6 +2827,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'bulkClear','bulkCount','bulkToggle','bulkToggleAll','bulkCheckboxCell','bulkSelectAllCell','bulkBar','bulkClearAndRerender','outwardLinkedReturns','bulkDelete_out','bulkDelete_trf','bulkDelete_inw','_runBulkDeleteOut','_runBulkDeleteTrf','_runBulkDeleteInw','_bulkSyncBar', // REQ 1: bulk delete
     'applyTransferFilter','setTransferSearch','setTransferFrom','setTransferTo','setTransferGroup','clearTransferFilter','groupTransfersByReference','exportTransfers', // ADDED (Issue 3)
     'pickUserLogo','pickEditUserLogo','removeEditUserLogo','renderUserBrand','clearUserBrand','outRevenue','outUnits','outCommission','isReturn','outTypeLabel', // FEATURE 1/7 + Issue 4
+    'returnDisposition','isSellableReturn','setReturnDisposition','dispositionControl', // REQ 3: FBA return disposition
     'reportCard','reportRows','reportCSV','reportCSVFor','reportPDF','buildPDF',
     'buildSkuProfitReport','renderSkuReport','rptSetWh','rptSetFrom','rptSetTo','rptSetSearch','rptSort','rptClear','rptSortArrow','rptExportCSV','rptInDate', // REQ 4: SKU profitability
     'addBrand','removeBrand','addWarehouse','removeWarehouse','createUser','toggleUser','deleteUser','killCharts',
@@ -3824,7 +3880,7 @@ async function liveLoadAll(){
   OUTWARD.length=0; OUTWARD_ID={};
   (out||[]).forEach(o=>{
     const disp=o.id;
-    OUTWARD.push({ id:disp, type:(o.txn_type||'sale'), origRef:o.orig_ref||'', order:o.order_ref, channel:o.channel, sku:o.products?o.products.sku:'', qty:o.qty, price:Number(o.selling_price)||0, commission:Number(o.commission)||0, date:o.date, wh:o.warehouses?o.warehouses.name:'', brand:'', source:(o.source||'manual'), fulfilment:(o.fulfilment||'') }); // FEATURE 1 + Amazon: source/fulfilment
+    OUTWARD.push({ id:disp, type:(o.txn_type||'sale'), origRef:o.orig_ref||'', order:o.order_ref, channel:o.channel, sku:o.products?o.products.sku:'', qty:o.qty, price:Number(o.selling_price)||0, commission:Number(o.commission)||0, date:o.date, wh:o.warehouses?o.warehouses.name:'', brand:'', source:(o.source||'manual'), fulfilment:(o.fulfilment||''), disposition:(o.disposition||'sellable') }); // FEATURE 1 + Amazon: source/fulfilment + REQ 3: disposition
     OUTWARD_ID[disp]=o.id;
   });
 
@@ -4031,6 +4087,14 @@ async function liveAddOutward(o){
   if (error) throw error; await liveLoadAll();
 }
 async function liveDeleteOutward(dispId){ const id=OUTWARD_ID[dispId]||dispId; const { error } = await sb.from('outward').delete().eq('id', id); if(error) throw error; await liveLoadAll(); }
+// REQ 3: persist a return's disposition (sellable | damaged | unsellable) + audit, then reload.
+async function liveSetDisposition(dispId, disposition){
+  const id=OUTWARD_ID[dispId]||dispId;
+  const patch={ disposition, disposition_set_at:new Date().toISOString(), disposition_set_by:(CURRENT&&CURRENT.email)||'' };
+  const { error } = await sb.from('outward').update(patch).eq('id', id);
+  if(error) throw error;
+  await liveLoadAll();
+}
 async function liveAddTransfer(t){
   const row = { product_id:resolveProdId(t.sku), qty:t.qty, from_wh:resolveWhId(t.from), to_wh:resolveWhId(t.to), date:t.date, created_by:CURRENT.id }; // FIXED (Issue 4)
   if (t.ref) row.reference = t.ref;   // ADDED: reference tracking
