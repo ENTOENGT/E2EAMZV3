@@ -410,6 +410,14 @@ tr.row-return td{border-top:1px dashed #f0d3d8}
 .sales-filter-row .filter-input{min-width:150px}
 .sales-filter-row input[type=text]{flex:1;min-width:200px}
 .ref-badge{display:inline-block;background:var(--teal);color:#fff;font-size:10px;font-weight:800;letter-spacing:.06em;padding:2px 7px;border-radius:6px;vertical-align:middle}
+/* ADDED (Req 1): bulk selection + delete */
+.bulk-chk{width:16px;height:16px;cursor:pointer;accent-color:var(--teal);vertical-align:middle}
+th.bulk-col,td.bulk-col{width:34px;text-align:center;padding-left:10px;padding-right:4px}
+.bulk-bar{display:flex;align-items:center;gap:12px;padding:9px 14px;margin:0 0 10px;background:var(--teal-soft);border:1px solid var(--teal);border-radius:10px;font-size:13px;font-weight:600;color:var(--teal)}
+.bulk-bar .spacer{flex:1}
+.bulk-bar .bulk-count{color:var(--ink)}
+.btn-del-solid.sm{padding:6px 13px;font-size:13px;border-radius:8px}
+.bulk-selall{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--ink-soft);cursor:pointer;user-select:none}
 .modal-body table{width:100%;border-collapse:collapse}
 .pm-modal-table{table-layout:auto;min-width:520px}
 .pm-modal-table th,.pm-modal-table td{padding:9px 12px;white-space:nowrap;vertical-align:middle;text-align:left}
@@ -881,7 +889,7 @@ const NAV = [
   {group:'Operations', items:[
     {id:'inward', label:'Inward', icon:'download'},
     {id:'inventory', label:'Inventory', icon:'box'},
-    {id:'outward', label:'Outward · Sales', icon:'upload'},
+    {id:'outward', label:'Outward', icon:'upload'},
   ]},
   {group:'Insight', items:[
     {id:'finance', label:'Financials', icon:'trending'},
@@ -1174,7 +1182,8 @@ function toggleBoe(boe){ BOE_OPEN[boe]=!BOE_OPEN[boe]; RENDER.inward(); }
 function renderInwardGroups(rows, showDelete){
   const groups={};
   rows.forEach(r=>{ (groups[r.boe]=groups[r.boe]||[]).push(r); });
-  return Object.keys(groups).map(boe=>{
+  const bar = showDelete ? bulkBar('inw') : '';
+  return bar + Object.keys(groups).map(boe=>{
     const g=groups[boe];
     const totVal=g.reduce((s,r)=>s+r.value,0), totQty=g.reduce((s,r)=>s+r.qty,0);
     const open = BOE_OPEN[boe]!==false; // default open
@@ -1192,14 +1201,17 @@ function renderInwardGroups(rows, showDelete){
           <div><span>Total value</span><b class="mono">${inr(totVal)}</b></div>
         </div>
       </div>
-      ${open? Object.keys(pos).map(po=>`
+      ${open? Object.keys(pos).map(po=>{
+        const poIds=pos[po].map(r=>r.id);
+        return `
         <div class="po-block">
           <div class="po-head"><span class="po-tag">PO No.</span><b>${esc(po)}</b>
             ${pos[po][0].type==='Return'?'<span class="pill over" style="margin-left:8px">Return</span>':'<span class="pill ok" style="margin-left:8px">Purchase</span>'}
             <span class="po-date mono">${esc(pos[po][0].date)} · ${esc(pos[po][0].wh)}</span></div>
           <div class="table-scroll"><table class="po-table">
-            <thead><tr><th>SKU</th><th>Description</th><th>Supplier</th><th>Brand</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value</th><th>GRN / Declaration</th>${showDelete?'<th></th>':''}</tr></thead>
+            <thead><tr>${showDelete?bulkSelectAllCell('inw',poIds):''}<th>SKU</th><th>Description</th><th>Supplier</th><th>Brand</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value</th><th>GRN / Declaration</th>${showDelete?'<th></th>':''}</tr></thead>
             <tbody>${pos[po].map(r=>`<tr>
+              ${showDelete?bulkCheckboxCell('inw',r.id):''}
               <td class="sku-cell">${esc(r.sku)}</td>
               <td>${esc(prod(r.sku).name||'')}</td>
               <td>${esc(r.supplier||'')}</td>
@@ -1211,7 +1223,7 @@ function renderInwardGroups(rows, showDelete){
               ${showDelete?`<td class="num"><button class="btn btn-ghost" style="padding:5px 9px" data-onclick="editInward('${r.id}')">Edit</button> <button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="askDeleteInward('${r.id}')">Delete</button></td>`:''}
             </tr>`).join('')}</tbody>
           </table></div>
-        </div>`).join('') : ''}
+        </div>`;}).join('') : ''}
     </div>`;
   }).join('');
 }
@@ -1642,21 +1654,152 @@ function groupOutwardByWarehouse(out){
   }).join('');
 }
 // ADDED (Issue 3): group sales by their reference / order number, with the reference as a header
+/* ============================================================
+   REQ 1 — Bulk selection + delete (shared across Sales / Transfers / Inward)
+   Scopes: 'out' (sales reference-wise), 'trf' (transfers reference-wise),
+           'inw' (inward BOE/PO groups). Selection is per-scope.
+============================================================ */
+const BULKSEL = { out:new Set(), trf:new Set(), inw:new Set() };
+function bulkClear(scope){ if(BULKSEL[scope]) BULKSEL[scope].clear(); }
+function bulkCount(scope){ return BULKSEL[scope]? BULKSEL[scope].size : 0; }
+function bulkToggle(scope, id, on){ const s=BULKSEL[scope]; if(!s) return; if(on) s.add(id); else s.delete(id); _bulkSyncBar(scope); }
+function bulkToggleAll(scope, idsCsv, on){
+  const s=BULKSEL[scope]; if(!s) return;
+  const ids=(idsCsv||'').split('|').filter(Boolean);
+  ids.forEach(id=> on? s.add(id) : s.delete(id));
+  // reflect every matching row checkbox + the group's select-all state
+  document.querySelectorAll('.bulk-chk[data-scope="'+scope+'"]').forEach(cb=>{ if(ids.indexOf(cb.getAttribute('data-id'))>=0) cb.checked=on; });
+  _bulkSyncBar(scope);
+}
+// Keep the floating "Delete selected (N)" bar + count in sync without a full re-render.
+function _bulkSyncBar(scope){
+  const n=bulkCount(scope);
+  const bar=document.getElementById('bulkBar_'+scope);
+  if(bar){ bar.style.display = n? 'flex':'none'; const c=bar.querySelector('.bulk-count'); if(c) c.textContent = n+' selected'; }
+}
+// A checkbox cell (per row). esc id so it is safe inside the attribute.
+function bulkCheckboxCell(scope, id){
+  return `<td class="bulk-col"><input type="checkbox" class="bulk-chk" data-scope="${scope}" data-id="${esc(id)}" ${BULKSEL[scope]&&BULKSEL[scope].has(id)?'checked':''} data-onchange="bulkToggle('${scope}','${esc(id)}',this.checked)"></td>`;
+}
+// A select-all checkbox for one group header row (ids piped together).
+function bulkSelectAllCell(scope, ids){
+  const idsCsv=ids.map(esc).join('|');
+  const allOn = ids.length>0 && ids.every(id=>BULKSEL[scope]&&BULKSEL[scope].has(id));
+  return `<th class="bulk-col"><input type="checkbox" class="bulk-chk" ${allOn?'checked':''} title="Select all in this group" data-onchange="bulkToggleAll('${scope}','${idsCsv}',this.checked)"></th>`;
+}
+// The floating action bar shown above a view when anything is selected.
+function bulkBar(scope, label){
+  const n=bulkCount(scope);
+  return `<div class="bulk-bar" id="bulkBar_${scope}" style="display:${n?'flex':'none'}">
+    <span class="bulk-count">${n} selected</span>
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" data-onclick="bulkClearAndRerender('${scope}')">Clear</button>
+    <button class="btn btn-del-solid sm" data-onclick="bulkDelete_${scope}()">Delete selected</button>
+  </div>`;
+}
+function bulkClearAndRerender(scope){
+  bulkClear(scope);
+  if(scope==='out') renderSalesTab();
+  else if(scope==='trf') renderTransferTab();
+  else if(scope==='inw') RENDER.inward();
+}
+// ---- Linked-record safety: a sale that has a Sales Return pointing at it (origRef === order)
+// cannot be deleted without orphaning that return. Returns the list of blocked orders.
+function outwardLinkedReturns(ids){
+  // ids are the OUTWARD display ids selected. Find the sale rows among them, then
+  // check whether any return (anywhere in OUTWARD) references that sale's order.
+  const sel=OUTWARD.filter(o=>ids.indexOf(o.id)>=0);
+  const blocked=[];
+  sel.forEach(o=>{
+    if(isReturn(o)) return;                       // returns themselves are freely deletable
+    const ref=o.order;
+    const hasReturn=OUTWARD.some(r=>isReturn(r) && (r.origRef===ref) && ids.indexOf(r.id)<0);
+    if(hasReturn) blocked.push(ref);
+  });
+  return blocked;
+}
+async function bulkDelete_out(){
+  const ids=[...BULKSEL.out];
+  if(!ids.length){ toast('Nothing selected'); return; }
+  const blocked=outwardLinkedReturns(ids);
+  const deletable=ids.filter(id=>{ const o=OUTWARD.find(x=>x.id===id); return o && !(( !isReturn(o)) && blocked.indexOf(o.order)>=0); });
+  let msg=`Delete ${deletable.length} selected record${deletable.length>1?'s':''}? Stock and financials will be re-adjusted.`;
+  if(blocked.length) msg+=`\n\n${blocked.length} sale(s) are linked to a Sales Return and will be SKIPPED (delete the return first): ${blocked.slice(0,5).join(', ')}${blocked.length>5?'…':''}`;
+  if(!deletable.length){ toast(`All selected sales are linked to returns — delete the returns first.`); return; }
+  confirmAction(msg, ()=>_runBulkDeleteOut(deletable, blocked.length));
+}
+async function _runBulkDeleteOut(deletable, skipped){
+  let ok=0, fail=0;
+  for(const id of deletable){
+    try{
+      if(window.LIVE && typeof liveDeleteOutward==='function'){ await liveDeleteOutward(id); }
+      else { const i=OUTWARD.findIndex(o=>o.id===id); if(i>=0) OUTWARD.splice(i,1); }
+      ok++;
+    }catch(e){ fail++; console.error('bulk delete outward failed', id, e); }
+  }
+  bulkClear('out');
+  if(!(window.LIVE)) { recomputeStock(); touchUpdated(); }
+  renderSalesTab();
+  toast(`Deleted ${ok} record${ok!==1?'s':''}${fail?`, ${fail} failed`:''}${skipped?`, ${skipped} skipped (linked)`:''}`);
+}
+async function bulkDelete_trf(){
+  const ids=[...BULKSEL.trf];
+  if(!ids.length){ toast('Nothing selected'); return; }
+  confirmAction(`Delete ${ids.length} selected transfer${ids.length>1?'s':''}? Stock will be re-adjusted.`, ()=>_runBulkDeleteTrf(ids));
+}
+async function _runBulkDeleteTrf(ids){
+  let ok=0, fail=0;
+  for(const id of ids){
+    try{
+      if(window.LIVE && typeof liveDeleteTransfer==='function'){ await liveDeleteTransfer(id); }
+      else { deleteTransfer(id); }
+      ok++;
+    }catch(e){ fail++; console.error('bulk delete transfer failed', id, e); }
+  }
+  bulkClear('trf');
+  if(!(window.LIVE)){ recomputeStock(); touchUpdated(); }
+  renderTransferTab();
+  toast(`Deleted ${ok} transfer${ok!==1?'s':''}${fail?`, ${fail} failed`:''}`);
+}
+async function bulkDelete_inw(){
+  const ids=[...BULKSEL.inw];
+  if(!ids.length){ toast('Nothing selected'); return; }
+  confirmAction(`Delete ${ids.length} selected inward record${ids.length>1?'s':''}? Stock will be reversed.`, ()=>_runBulkDeleteInw(ids));
+}
+async function _runBulkDeleteInw(ids){
+  let ok=0, fail=0;
+  for(const id of ids){
+    try{
+      if(window.LIVE && typeof liveDeleteInward==='function'){ await liveDeleteInward(id); }
+      else { const i=INWARD.findIndex(r=>r.id===id); if(i>=0) INWARD.splice(i,1); }
+      ok++;
+    }catch(e){ fail++; console.error('bulk delete inward failed', id, e); }
+  }
+  bulkClear('inw');
+  if(!(window.LIVE)){ recomputeStock(); touchUpdated(); }
+  RENDER.inward();
+  toast(`Deleted ${ok} inward record${ok!==1?'s':''}${fail?`, ${fail} failed`:''}`);
+}
+
 function groupOutwardByReference(out){
   const groups={};
   out.forEach(o=>{ const ref=o.order||'(no reference)'; (groups[ref]=groups[ref]||[]).push(o); });
-  return Object.keys(groups).sort().map(ref=>{
+  const admin=isAdmin();
+  const bar = admin ? bulkBar('out') : '';
+  return bar + Object.keys(groups).sort().map(ref=>{
     const g=groups[ref];
     const val=g.reduce((s,o)=>s+outRevenue(o),0), units=g.reduce((s,o)=>s+outUnits(o),0), comm=g.reduce((s,o)=>s+outCommission(o),0);
     const ch=g[0]?g[0].channel:'';
+    const ids=g.map(o=>o.id);
     return `<div class="wh-group">
       <div class="wh-head">
         <div class="wh-name"><span class="ref-badge">REF</span> ${esc(ref)}${ch?` <span class="tag ${channelClass(ch)}" style="margin-left:8px">${esc(ch)}</span>`:''}</div>
         <div class="wh-meta"><span>${g.length} line${g.length>1?'s':''}</span><span>${num2(units)} net units</span><span>comm ${inr(comm)}</span><b class="mono">${inr(val)}</b></div>
       </div>
       <div class="table-scroll"><table class="wh-table">
-        <thead><tr><th>Type</th><th>SKU</th><th>Product</th><th>Channel</th><th>Warehouse</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th>${isAdmin()?'<th></th>':''}</tr></thead>
+        <thead><tr>${admin?bulkSelectAllCell('out',ids):''}<th>Type</th><th>SKU</th><th>Product</th><th>Channel</th><th>Warehouse</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th>${admin?'<th></th>':''}</tr></thead>
         <tbody>${g.map(o=>{const v=outRevenue(o), cm=outCommission(o); return `<tr class="${isReturn(o)?'row-return':''}">
+          ${admin?bulkCheckboxCell('out',o.id):''}
           <td>${isReturn(o)?'<span class="pill ret">Return</span>':'<span class="pill ok">Sale</span>'}</td>
           <td class="sku-cell">${esc(o.sku)}</td>
           <td>${esc(prod(o.sku).name||'')}</td>
@@ -1665,7 +1808,7 @@ function groupOutwardByReference(out){
           <td class="num mono">${isReturn(o)?'−':''}${o.qty}</td><td class="num mono">${inr(o.price)}</td><td class="num mono ${isReturn(o)?'neg':''}">${inr(v)}</td>
           <td class="num mono">${inr(cm)}</td><td class="num mono ${v-cm<0?'neg':'pos'}">${inr(v-cm)}</td>
           <td class="mono">${esc(o.date)}</td>
-          ${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button></td>`:''}
+          ${admin?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button></td>`:''}
         </tr>`;}).join('')}</tbody>
       </table></div>
     </div>`;
@@ -2011,17 +2154,20 @@ function renderTransferTab(){
 function groupTransfersByReference(list){
   const groups={};
   list.forEach(t=>{ const ref=t.ref||'(no reference)'; (groups[ref]=groups[ref]||[]).push(t); });
-  return Object.keys(groups).sort().map(ref=>{
+  const admin=isAdmin();
+  const bar = admin ? bulkBar('trf') : '';
+  return bar + Object.keys(groups).sort().map(ref=>{
     const g=groups[ref];
     const units=g.reduce((s,t)=>s+t.qty,0), val=g.reduce((s,t)=>s+t.qty*inwardUnitCost(t.sku,t.from),0);
+    const ids=g.map(t=>t.id);
     return `<div class="wh-group">
       <div class="wh-head">
         <div class="wh-name"><span class="ref-badge">REF</span> ${esc(ref)}</div>
         <div class="wh-meta"><span>${g.length} move${g.length>1?'s':''}</span><span>${num2(units)} units</span><b class="mono">${inr(val)}</b></div>
       </div>
       <div class="table-scroll"><table class="wh-table">
-        <thead><tr><th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
-        <tbody>${g.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(inwardUnitCost(t.sku,t.from))}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
+        <thead><tr>${admin?bulkSelectAllCell('trf',ids):''}<th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${admin?'<th></th>':''}</tr></thead>
+        <tbody>${g.map(t=>`<tr>${admin?bulkCheckboxCell('trf',t.id):''}<td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(inwardUnitCost(t.sku,t.from))}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${admin?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
       </table></div>
     </div>`;
   }).join('');
@@ -2159,15 +2305,9 @@ RENDER.finance=function(){
   const tNetRev=tSales-tReturns;
   const tCogs=list.reduce((s,r)=>s+r.cogs,0), tComm=list.reduce((s,r)=>s+r.comm,0), tNet=tNetRev-tCogs-tComm;
   C.innerHTML=`
-  ${isAdmin()?`<div class="card" style="margin-bottom:16px">
-    <div class="card-head"><div><h3>Amazon settlement import</h3><div class="ch-sub">Upload an Amazon settlement/transactions CSV to apply real fees &amp; refunds</div></div>
-      <div class="spacer"></div>
-      <input type="file" id="settlementFile" accept=".csv" style="display:none" data-onchange="handleSettlementUpload(this)">
-      <button class="btn btn-orange" data-onclick="document.getElementById('settlementFile').click()">Upload settlement CSV</button>
-    </div>
-    ${importErrorBanner('settlement')}
-    <p style="color:var(--ink-soft);font-size:12.5px;margin:4px 0 0">Matches each <b>Order Payment</b> to its sale and sets the real Amazon commission; brings in <b>Refunds</b> as Sales Returns; records account-level <b>Service Fees</b> as expenses. Safe to re-import — duplicate lines are skipped.</p>
-  </div>`:''}
+  <!-- REQ 2: Manual "Amazon settlement import" card removed — settlement data now arrives
+       automatically via the scheduled Amazon sync (Finances API). The underlying functions
+       remain in the code but are no longer reachable from the UI. -->
   <div class="kpi-grid">
     ${kpi('Net Revenue', inrK(tNetRev), 'sales − returns','','trending')}
     ${kpi('Sales Returns', inrK(tReturns), tSales?((tReturns/tSales)*100).toFixed(1)+'% of sales':'','down','trending',true)}
@@ -2233,11 +2373,146 @@ RENDER.alerts=function(){
 /* ============================================================
    REPORTS  (proper PDF via formatted print document)
 ============================================================ */
+/* ============================================================
+   REQ 4 — Warehouse-wise, SKU-wise sales & profitability report
+   Reuses the same cost/commission model as Financials (financeByMonth):
+     Net Units   = units sold − units returned
+     Net Sales   = gross sales − sales returns
+     COGS        = net units × weighted-avg inward unit cost (returns reduce COGS)
+     Net Profit  = Net Sales − Commission − Other Fees − COGS   (no double-deduct)
+     Margin %    = Net Profit / Net Sales × 100   (0 when Net Sales ≤ 0)
+   "Other Marketplace Fees" and "Opening Stock" are not tracked separately in the
+   data today, so they are shown where available and 0/— otherwise.
+============================================================ */
+const RPT = { wh:'', from:'', to:'', q:'', sortKey:'netProfit', sortDir:'desc' };
+function rptInDate(d){
+  if(!d) return true;
+  if(RPT.from && d < RPT.from) return false;
+  if(RPT.to   && d > RPT.to)   return false;
+  return true;
+}
+// Build one row per SKU for the chosen warehouse + date window.
+function buildSkuProfitReport(){
+  const whSel = RPT.wh;                     // '' or 'all' => all warehouses; else a specific one
+  const specific = whSel && whSel!=='all';
+  // Base: outward rows in scope, in the date window, for the selected warehouse.
+  const rows = scopeOutward().filter(o=> rptInDate(o.date) && (!specific || o.wh===whSel));
+  const map = {};
+  rows.forEach(o=>{
+    const k=o.sku;
+    const m = map[k] || (map[k]={ sku:o.sku, name:(prod(o.sku).name||''), brand:(prod(o.sku).brand||''),
+      unitsSold:0, unitsReturned:0, grossSales:0, returnValue:0, commission:0, otherFees:0 });
+    if(isReturn(o)){ m.unitsReturned += o.qty; m.returnValue += o.qty*o.price; }
+    else           { m.unitsSold     += o.qty; m.grossSales  += o.qty*o.price; }
+    m.commission += outCommission(o);                 // signed: a return's commission refund reduces it
+    // otherFees stays 0 — not tracked separately in the current data model
+  });
+  // Finalise each SKU: COGS, remaining stock, profit, margin.
+  const out = Object.values(map).map(m=>{
+    const netUnits = m.unitsSold - m.unitsReturned;
+    const netSales = m.grossSales - m.returnValue;
+    // COGS mirrors financeByMonth: net units × unit cost (returns give COGS back).
+    const unitCost = specific ? inwardUnitCost(m.sku, whSel) : inwardUnitCost(m.sku, null);
+    const cogs = netUnits * unitCost;
+    // Remaining stock: for a specific warehouse use that warehouse; for "all" sum across warehouses.
+    let remainQty, remainCost;
+    if(specific){ remainQty = stockQty(m.sku, whSel); remainCost = remainQty * inwardUnitCost(m.sku, whSel); }
+    else {
+      remainQty = STOCK.filter(s=>s.sku===m.sku).reduce((s,r)=>s+r.qty,0);
+      remainCost = STOCK.filter(s=>s.sku===m.sku).reduce((s,r)=>s+r.qty*inwardUnitCost(m.sku,r.wh),0);
+    }
+    const netProfit = netSales - m.commission - m.otherFees - cogs;
+    const margin = netSales>0 ? (netProfit/netSales*100) : 0;
+    return { ...m, netUnits, netSales, cogs, unitCost, remainQty, remainCost, netProfit, margin };
+  });
+  // Search filter (SKU or product name).
+  const q=(RPT.q||'').toLowerCase().trim();
+  const filtered = q ? out.filter(r=> (r.sku+' '+r.name).toLowerCase().includes(q)) : out;
+  // Sort.
+  const dir = RPT.sortDir==='asc'?1:-1;
+  filtered.sort((a,b)=>{
+    const ka=a[RPT.sortKey], kb=b[RPT.sortKey];
+    if(typeof ka==='string') return ka.localeCompare(kb)*dir;
+    return ((ka||0)-(kb||0))*dir;
+  });
+  return filtered;
+}
+function rptSetWh(v){ RPT.wh=v; renderSkuReport(); }
+function rptSetFrom(v){ RPT.from=v; renderSkuReport(); }
+function rptSetTo(v){ RPT.to=v; renderSkuReport(); }
+function rptSetSearch(v){ RPT.q=v; renderSkuReport(); }
+function rptSort(key){ if(RPT.sortKey===key){ RPT.sortDir = RPT.sortDir==='asc'?'desc':'asc'; } else { RPT.sortKey=key; RPT.sortDir='desc'; } renderSkuReport(); }
+function rptClear(){ RPT.wh=''; RPT.from=''; RPT.to=''; RPT.q=''; RPT.sortKey='netProfit'; RPT.sortDir='desc'; RENDER.reports(); }
+function rptSortArrow(key){ if(RPT.sortKey!==key) return ''; return RPT.sortDir==='asc'?' ▲':' ▼'; }
+
+// On-screen table (re-rendered on every control change) into #rptResult.
+function renderSkuReport(){
+  const el=document.getElementById('rptResult'); if(!el) return;
+  const data=buildSkuProfitReport();
+  const whLabel = (!RPT.wh||RPT.wh==='all')?'All warehouses':RPT.wh;
+  if(!data.length){ el.innerHTML=`<p style="color:var(--ink-soft);font-size:13px;padding:10px 2px">No sales found for ${esc(whLabel)}${RPT.from||RPT.to?' in the selected dates':''}.</p>`; return; }
+  const th=(key,label,cls)=>`<th class="${cls||''}" data-onclick="rptSort('${key}')" style="cursor:pointer;user-select:none" title="Sort">${label}${rptSortArrow(key)}</th>`;
+  // Totals
+  const t={ unitsSold:0,unitsReturned:0,netUnits:0,grossSales:0,returnValue:0,netSales:0,commission:0,otherFees:0,cogs:0,remainQty:0,remainCost:0,netProfit:0 };
+  data.forEach(r=>{ for(const k in t) t[k]+=(r[k]||0); });
+  const tMargin = t.netSales>0?(t.netProfit/t.netSales*100):0;
+  el.innerHTML=`
+    <div class="table-scroll"><table class="wh-table">
+      <thead><tr>
+        ${th('sku','SKU')}${th('name','Product')}
+        ${th('unitsSold','Units Sold','num')}${th('unitsReturned','Units Ret.','num')}${th('netUnits','Net Units','num')}
+        ${th('grossSales','Gross Sales','num')}${th('returnValue','Return Value','num')}${th('netSales','Net Sales','num')}
+        ${th('commission','Commission','num')}${th('otherFees','Other Fees','num')}${th('cogs','COGS','num')}
+        ${th('remainQty','Rem. Qty','num')}${th('remainCost','Rem. Stock Cost','num')}
+        ${th('netProfit','Net Profit','num')}${th('margin','Margin %','num')}
+      </tr></thead>
+      <tbody>${data.map(r=>`<tr>
+        <td class="sku-cell">${esc(r.sku)}</td><td>${esc(r.name)}</td>
+        <td class="num mono">${r.unitsSold}</td><td class="num mono ${r.unitsReturned?'neg':''}">${r.unitsReturned?'−'+r.unitsReturned:0}</td><td class="num mono">${r.netUnits}</td>
+        <td class="num mono">${inr(r.grossSales)}</td><td class="num mono ${r.returnValue?'neg':''}">${r.returnValue?'−'+inr(r.returnValue):inr(0)}</td><td class="num mono">${inr(r.netSales)}</td>
+        <td class="num mono">${inr(r.commission)}</td><td class="num mono">${inr(r.otherFees)}</td><td class="num mono">${inr(r.cogs)}</td>
+        <td class="num mono">${r.remainQty}</td><td class="num mono">${inr(r.remainCost)}</td>
+        <td class="num mono ${r.netProfit>=0?'pos':'neg'}">${inr(r.netProfit)}</td><td class="num mono ${r.margin>=0?'pos':'neg'}">${r.margin.toFixed(1)}%</td>
+      </tr>`).join('')}</tbody>
+      <tfoot><tr style="font-weight:700;background:var(--bg)">
+        <td>Total</td><td>${data.length} SKU${data.length>1?'s':''}</td>
+        <td class="num mono">${t.unitsSold}</td><td class="num mono neg">${t.unitsReturned?'−'+t.unitsReturned:0}</td><td class="num mono">${t.netUnits}</td>
+        <td class="num mono">${inr(t.grossSales)}</td><td class="num mono neg">${t.returnValue?'−'+inr(t.returnValue):inr(0)}</td><td class="num mono">${inr(t.netSales)}</td>
+        <td class="num mono">${inr(t.commission)}</td><td class="num mono">${inr(t.otherFees)}</td><td class="num mono">${inr(t.cogs)}</td>
+        <td class="num mono">${t.remainQty}</td><td class="num mono">${inr(t.remainCost)}</td>
+        <td class="num mono ${t.netProfit>=0?'pos':'neg'}">${inr(t.netProfit)}</td><td class="num mono ${tMargin>=0?'pos':'neg'}">${tMargin.toFixed(1)}%</td>
+      </tr></tfoot>
+    </table></div>`;
+}
+// CSV export of the SKU profitability report (respects current warehouse/date/search/sort).
+function rptExportCSV(){
+  const data=buildSkuProfitReport();
+  if(!data.length){ toast('No data for this report yet'); return; }
+  const d2=v=>Number(v||0).toFixed(2);
+  const head=['SKU','Product Name','Units Sold','Units Returned','Net Units','Gross Sales','Sales Return Value','Net Sales','Marketplace Commission','Other Marketplace Fees','COGS','Remaining Stock Qty','Remaining Stock Cost','Net Profit','Profit Margin %'];
+  const rows=data.map(r=>[r.sku,r.name,r.unitsSold,r.unitsReturned,r.netUnits,d2(r.grossSales),d2(r.returnValue),d2(r.netSales),d2(r.commission),d2(r.otherFees),d2(r.cogs),r.remainQty,d2(r.remainCost),d2(r.netProfit),r.margin.toFixed(1)]);
+  const whLabel=(!RPT.wh||RPT.wh==='all')?'all-warehouses':RPT.wh.replace(/[^a-z0-9]+/gi,'-');
+  downloadCSV(`sku-profitability_${whLabel}.csv`,[head,...rows]);
+}
+
 RENDER.reports=function(){
-  setHead('Reports','Download Excel / CSV / PDF');
+  setHead('Reports','SKU profitability · Download Excel / CSV / PDF');
   C.innerHTML=`
+  <!-- REQ 4: Warehouse-wise, SKU-wise sales & profitability -->
   <div class="card" style="margin-bottom:20px">
-    <div class="card-head"><div><h3>Build a report</h3><div class="ch-sub">Pick a report and format</div></div></div>
+    <div class="card-head"><div><h3>SKU profitability by warehouse</h3><div class="ch-sub">Pick a warehouse (and optional dates) to see sales, returns, costs & net profit per SKU</div></div><div class="spacer"></div><button class="btn btn-teal" data-onclick="rptExportCSV()">Export Excel / CSV</button></div>
+    <div class="form-grid" style="margin-bottom:12px">
+      <div class="fg-field"><label>Warehouse</label><select id="rpt_wh" data-searchable data-ph="Search warehouse…" data-onchange="rptSetWh(this.value)"><option value="all"${(!RPT.wh||RPT.wh==='all')?' selected':''}>All warehouses</option>${WAREHOUSES.map(w=>`<option${RPT.wh===w?' selected':''}>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Date from</label><input type="date" id="rpt_from" value="${esc(RPT.from)}" data-onchange="rptSetFrom(this.value)"></div>
+      <div class="fg-field"><label>Date to</label><input type="date" id="rpt_to" value="${esc(RPT.to)}" data-onchange="rptSetTo(this.value)"></div>
+      <div class="fg-field"><label>Search SKU / product</label><input type="text" id="rpt_q" value="${esc(RPT.q)}" placeholder="Type to filter…" data-oninput="rptSetSearch(this.value)"></div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px"><button class="btn btn-ghost" data-onclick="rptClear()">Reset filters</button></div>
+    <div id="rptResult"></div>
+  </div>
+
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-head"><div><h3>Other reports</h3><div class="ch-sub">Pick a report and format</div></div></div>
     <div class="form-grid">
       <div class="fg-field"><label>Report</label><select id="rp_type"><option value="inventory">Inventory snapshot</option><option value="sales">Sales summary</option><option value="inward">Inward register (BOE / PO)</option><option value="pnl">P&L by Month</option></select></div>
       <div class="fg-field"><label>Warehouse</label><select id="rp_wh" data-searchable data-ph="Search warehouse…"><option value="all">All</option>${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
@@ -2253,6 +2528,7 @@ RENDER.reports=function(){
     ${reportCard('Inward register','BOE, PO & SKU intake','reportCSVFor(&quot;inward&quot;)')}
     ${reportCard('P&L by Month','Revenue, returns, cost & net','reportCSVFor(&quot;pnl&quot;)')}
   </div>`;
+  renderSkuReport();   // searchable selects auto-upgrade via the MutationObserver
 };
 function reportCard(t,d,fn){
   return `<div class="card" style="display:flex;align-items:center;gap:14px">
@@ -2493,9 +2769,11 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct','inwardUnitCost','stockLineValue',
     'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
     'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter','setSalesWh','setSalesChannel','setSalesSearch','setSalesGroup','setSalesTxn','setSalesSrc','outwardTypeChange','groupOutwardByReference','num2','renderAmazonSync','runAmazonSyncNow',
+    'bulkClear','bulkCount','bulkToggle','bulkToggleAll','bulkCheckboxCell','bulkSelectAllCell','bulkBar','bulkClearAndRerender','outwardLinkedReturns','bulkDelete_out','bulkDelete_trf','bulkDelete_inw','_runBulkDeleteOut','_runBulkDeleteTrf','_runBulkDeleteInw','_bulkSyncBar', // REQ 1: bulk delete
     'applyTransferFilter','setTransferSearch','setTransferFrom','setTransferTo','setTransferGroup','clearTransferFilter','groupTransfersByReference','exportTransfers', // ADDED (Issue 3)
     'pickUserLogo','pickEditUserLogo','removeEditUserLogo','renderUserBrand','clearUserBrand','outRevenue','outUnits','outCommission','isReturn','outTypeLabel', // FEATURE 1/7 + Issue 4
     'reportCard','reportRows','reportCSV','reportCSVFor','reportPDF','buildPDF',
+    'buildSkuProfitReport','renderSkuReport','rptSetWh','rptSetFrom','rptSetTo','rptSetSearch','rptSort','rptClear','rptSortArrow','rptExportCSV','rptInDate', // REQ 4: SKU profitability
     'addBrand','removeBrand','addWarehouse','removeWarehouse','createUser','toggleUser','deleteUser','killCharts',
     'showFieldError','clearFieldError','isValidEmail','passwordProblems',
     'openModal','closeModal','_runModalSave','confirmAction','_runConfirm',
