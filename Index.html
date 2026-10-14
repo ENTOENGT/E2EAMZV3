@@ -661,6 +661,24 @@ function scopeTransfers(){
   return TRANSFERS.filter(t=>(isAdmin()? true : skus.has(t.sku)) && (WH_FILTER==='all'||t.from===WH_FILTER||t.to===WH_FILTER));
 }
 function stockQty(sku,wh){ const r=STOCK.find(s=>s.sku===sku&&s.wh===wh); return r?r.qty:0; }
+// REQ 3/4 FIX: authoritative balance for a SKU (optionally one warehouse), computed the SAME way
+// as recomputeStock — Inward − Sold + Sellable Returns ± Transfers — and clamped at 0.
+// Reports use this instead of reading the stored STOCK table, so they can never show a
+// stale/negative remaining quantity that disagrees with the live Inventory page.
+function balanceQty(sku, wh){
+  let q=0;
+  INWARD.forEach(r=>{ if(r.sku===sku && (!wh || r.wh===wh)) q += (Number(r.qty)||0); });
+  OUTWARD.forEach(o=>{ if(o.sku!==sku) return; if(wh && o.wh!==wh) return;
+    if(o.type==='return'){ if(isSellableReturn(o)) q += (Number(o.qty)||0); }
+    else { q -= (Number(o.qty)||0); }
+  });
+  TRANSFERS.forEach(t=>{ if(t.sku!==sku) return;
+    if(!wh){ return; }                 // across all warehouses a transfer nets to zero
+    if(t.from===wh) q -= (Number(t.qty)||0);
+    if(t.to===wh)   q += (Number(t.qty)||0);
+  });
+  return q<0 ? 0 : q;                   // clamp, exactly like recomputeStock
+}
 // FIXED (inventory valuation): stock value must use the ACTUAL cost paid on inward,
 // not the product master's cost price. Each inward row stores qty + total value, so the
 // unit cost is value/qty. We use a weighted average across all inward rows for that SKU
@@ -2469,12 +2487,21 @@ function buildSkuProfitReport(){
     // COGS mirrors financeByMonth: net units × unit cost (returns give COGS back).
     const unitCost = specific ? inwardUnitCost(m.sku, whSel) : inwardUnitCost(m.sku, null);
     const cogs = netUnits * unitCost;
-    // Remaining stock: for a specific warehouse use that warehouse; for "all" sum across warehouses.
+    // Remaining stock: computed from the ledgers via balanceQty (same math as the live
+    // Inventory page, clamped ≥ 0) so the report can never disagree or show a negative qty.
     let remainQty, remainCost;
-    if(specific){ remainQty = stockQty(m.sku, whSel); remainCost = remainQty * inwardUnitCost(m.sku, whSel); }
-    else {
-      remainQty = STOCK.filter(s=>s.sku===m.sku).reduce((s,r)=>s+r.qty,0);
-      remainCost = STOCK.filter(s=>s.sku===m.sku).reduce((s,r)=>s+r.qty*inwardUnitCost(m.sku,r.wh),0);
+    if(specific){
+      remainQty  = balanceQty(m.sku, whSel);
+      remainCost = remainQty * inwardUnitCost(m.sku, whSel);
+    } else {
+      // All warehouses: sum each warehouse's clamped balance, cost it at that warehouse's unit cost.
+      const whsForSku = [...new Set([
+        ...INWARD.filter(r=>r.sku===m.sku).map(r=>r.wh),
+        ...OUTWARD.filter(o=>o.sku===m.sku).map(o=>o.wh),
+        ...STOCK.filter(s=>s.sku===m.sku).map(s=>s.wh)
+      ])].filter(Boolean);
+      remainQty=0; remainCost=0;
+      whsForSku.forEach(w=>{ const q=balanceQty(m.sku, w); remainQty+=q; remainCost += q*inwardUnitCost(m.sku, w); });
     }
     const netProfit = netSales - m.commission - m.otherFees - cogs;
     const margin = netSales>0 ? (netProfit/netSales*100) : 0;
@@ -2836,7 +2863,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
-    'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection',
+    'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
     'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
     'addInwardLine','removeInwardLine','syncInwardLine','renderInwardLines','touchUpdatedSafe',
