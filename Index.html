@@ -724,11 +724,23 @@ function recomputeStock(){
     }
   });
   TRANSFERS.forEach(t=>{ bump(t.sku, t.from, -t.qty); bump(t.sku, t.to, t.qty); }); // move between warehouses
-  STOCK.length=0; // clear old (removes orphan entries)
-  Object.keys(map).forEach(k=>{
-    const q=map[k]; if(q===0) return;                             // drop zero/orphan lines
+  // FIX (Inventory visibility): a SKU+warehouse that had real movement (inward / sale / return /
+  // transfer) is a real stock line and must stay visible even when its balance is exactly 0 —
+  // it should read "0 / Out of stock", not vanish. Previously q===0 lines were dropped, which is
+  // why a fully-sold SKU showed on the report but disappeared from Inventory.
+  const touched={}; // key -> true if any ledger moved this sku@wh
+  const touch=(sku,wh)=>{ if(sku&&wh) touched[key(sku,wh)]=true; };
+  INWARD.forEach(r=>touch(r.sku,r.wh));
+  OUTWARD.forEach(o=>touch(o.sku,o.wh));
+  TRANSFERS.forEach(t=>{ touch(t.sku,t.from); touch(t.sku,t.to); });
+  STOCK.length=0;
+  // Union of keys that have a balance entry OR were touched (covers a 0-balance that cancelled out).
+  const allKeys=new Set([...Object.keys(map), ...Object.keys(touched)]);
+  allKeys.forEach(k=>{
+    if(!touched[k]) return;                 // never-moved orphan → skip
+    const q=map[k]||0;
     const [sku,wh]=k.split('@@');
-    STOCK.push({ sku, wh, qty: q<0?0:q });                        // prevent negative stock
+    STOCK.push({ sku, wh, qty: q<0?0:q });  // keep 0 lines; clamp negatives to 0
   });
 }
 
@@ -1081,7 +1093,7 @@ function kpi(label,val,delta,dir,icon,orange){
 }
 function lineOpts(){return{maintainAspectRatio:false,interaction:{intersect:false,mode:'index'},plugins:{legend:{position:'bottom',labels:{boxWidth:10,usePointStyle:true,padding:14}}},scales:{y:{grid:{color:'#eef2f3'},ticks:{callback:v=>'AED '+(v/1000)+'K'}},x:{grid:{display:false}}}};}
 function barOpts(){return{maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{boxWidth:10,usePointStyle:true,padding:14}}},scales:{y:{grid:{color:'#eef2f3'}},x:{grid:{display:false}}}};}
-function stockPill(p,qty){ if(qty<=(p.reorder||0)) return '<span class="pill low">Low</span>'; if(p.max&&qty>=p.max) return '<span class="pill over">Overstock</span>'; return '<span class="pill ok">Healthy</span>'; }
+function stockPill(p,qty){ if(qty<=0) return '<span class="pill ret">Out of stock</span>'; if(qty<=(p.reorder||0)) return '<span class="pill low">Low</span>'; if(p.max&&qty>=p.max) return '<span class="pill over">Overstock</span>'; return '<span class="pill ok">Healthy</span>'; }
 
 const hasData = () => PRODUCTS.length>0 || INWARD.length>0 || OUTWARD.length>0;
 
@@ -3918,10 +3930,12 @@ async function liveLoadAll(){
     TRANSFERS.push({ id:t.id, ref:t.reference||'', sku:t.products?t.products.sku:'', qty:t.qty, from:t.from?t.from.name:'', to:t.to?t.to.name:'', date:t.date, status:t.status });
   });
 
-  // stock (from the inventory view — already brand-filtered by RLS)
-  const { data: inv } = await sb.from('inventory').select('*');
-  STOCK.length=0;
-  (inv||[]).forEach(s=>{ STOCK.push({ sku:s.sku, wh:s.warehouse, qty:Number(s.on_hand)||0 }); });
+  // stock: rebuild from the ledgers (INWARD/OUTWARD/TRANSFERS loaded above) using the SAME
+  // authoritative, disposition-aware, floored formula as the Inventory page. We do NOT trust
+  // the database 'inventory' view directly, because it can carry a stale/negative on_hand
+  // (e.g. a −1 from a sale that outran its inward, or a return the view counted differently).
+  // Recomputing here guarantees Inventory, Reports and KPIs always agree and never show a negative.
+  recomputeStock();
 
   // users (admin only; RLS lets admin read all)
   if (isAdmin()) {
