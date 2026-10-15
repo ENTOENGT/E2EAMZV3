@@ -1744,7 +1744,7 @@ function groupOutwardByWarehouse(out){
    Scopes: 'out' (sales reference-wise), 'trf' (transfers reference-wise),
            'inw' (inward BOE/PO groups). Selection is per-scope.
 ============================================================ */
-const BULKSEL = { out:new Set(), trf:new Set(), inw:new Set() };
+const BULKSEL = { out:new Set(), trf:new Set(), inw:new Set(), prd:new Set() };
 function bulkClear(scope){ if(BULKSEL[scope]) BULKSEL[scope].clear(); }
 function bulkCount(scope){ return BULKSEL[scope]? BULKSEL[scope].size : 0; }
 function bulkToggle(scope, id, on){ const s=BULKSEL[scope]; if(!s) return; if(on) s.add(id); else s.delete(id); _bulkSyncBar(scope); }
@@ -1787,6 +1787,7 @@ function bulkClearAndRerender(scope){
   if(scope==='out') renderSalesTab();
   else if(scope==='trf') renderTransferTab();
   else if(scope==='inw') RENDER.inward();
+  else if(scope==='prd') RENDER.products();
 }
 // ---- Linked-record safety: a sale that has a Sales Return pointing at it (origRef === order)
 // cannot be deleted without orphaning that return. Returns the list of blocked orders.
@@ -1864,6 +1865,41 @@ async function _runBulkDeleteInw(ids){
   if(!(window.LIVE)){ recomputeStock(); touchUpdated(); }
   RENDER.inward();
   toast(`Deleted ${ok} inward record${ok!==1?'s':''}${fail?`, ${fail} failed`:''}`);
+}
+// REQ: bulk delete PRODUCTS. Deleting a product cascades (removes its inward/outward/transfer
+// records), so the confirmation shows BOTH the product count and how many linked records go with them.
+async function bulkDelete_prd(){
+  const skus=[...BULKSEL.prd];
+  if(!skus.length){ toast('Nothing selected'); return; }
+  // Count linked records that will be cascade-deleted, so the warning is honest.
+  let linked=0;
+  skus.forEach(sku=>{
+    linked += INWARD.filter(r=>r.sku===sku).length
+            + OUTWARD.filter(o=>o.sku===sku).length
+            + TRANSFERS.filter(t=>t.sku===sku).length;
+  });
+  const msg = `Delete ${skus.length} selected product${skus.length>1?'s':''}?`
+    + (linked ? `\n\nThis will ALSO permanently remove ${linked} linked record(s) (inward, sales, returns, transfers) for these products. This cannot be undone.` : `\n\nThese products have no linked records. This cannot be undone.`);
+  confirmAction(msg, ()=>_runBulkDeletePrd(skus));
+}
+async function _runBulkDeletePrd(skus){
+  let ok=0, fail=0;
+  for(const sku of skus){
+    try{
+      if(window.LIVE && typeof liveDeleteProduct==='function'){ await liveDeleteProduct(sku); }
+      else {
+        for(let i=PRODUCTS.length-1;i>=0;i--) if(PRODUCTS[i].sku===sku) PRODUCTS.splice(i,1);
+        for(let a=INWARD.length-1;a>=0;a--) if(INWARD[a].sku===sku) INWARD.splice(a,1);
+        for(let b=OUTWARD.length-1;b>=0;b--) if(OUTWARD[b].sku===sku) OUTWARD.splice(b,1);
+        for(let c=TRANSFERS.length-1;c>=0;c--) if(TRANSFERS[c].sku===sku) TRANSFERS.splice(c,1);
+      }
+      ok++;
+    }catch(e){ fail++; console.error('bulk delete product failed', sku, e); }
+  }
+  bulkClear('prd');
+  if(!(window.LIVE)){ recomputeStock(); touchUpdated(); }
+  RENDER.products();
+  toast(`Deleted ${ok} product${ok!==1?'s':''}${fail?`, ${fail} failed`:''}`);
 }
 
 function groupOutwardByReference(out){
@@ -2863,7 +2899,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct','inwardUnitCost','stockLineValue',
     'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
     'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter','setSalesWh','setSalesChannel','setSalesSearch','setSalesGroup','setSalesTxn','setSalesSrc','outwardTypeChange','groupOutwardByReference','num2','renderAmazonSync','runAmazonSyncNow',
-    'bulkClear','bulkCount','bulkToggle','bulkToggleAll','bulkCheckboxCell','bulkSelectAllCell','bulkBar','bulkClearAndRerender','outwardLinkedReturns','bulkDelete_out','bulkDelete_trf','bulkDelete_inw','_runBulkDeleteOut','_runBulkDeleteTrf','_runBulkDeleteInw','_bulkSyncBar', // REQ 1: bulk delete
+    'bulkClear','bulkCount','bulkToggle','bulkToggleAll','bulkCheckboxCell','bulkSelectAllCell','bulkBar','bulkClearAndRerender','outwardLinkedReturns','bulkDelete_out','bulkDelete_trf','bulkDelete_inw','_runBulkDeleteOut','_runBulkDeleteTrf','_runBulkDeleteInw','_bulkSyncBar','bulkDelete_prd','_runBulkDeletePrd', // REQ 1: bulk delete + Products
     'applyTransferFilter','setTransferSearch','setTransferFrom','setTransferTo','setTransferGroup','clearTransferFilter','groupTransfersByReference','exportTransfers', // ADDED (Issue 3)
     'pickUserLogo','pickEditUserLogo','removeEditUserLogo','renderUserBrand','clearUserBrand','outRevenue','outUnits','outCommission','isReturn','outTypeLabel', // FEATURE 1/7 + Issue 4
     'returnDisposition','isSellableReturn','setReturnDisposition','dispositionControl', // REQ 3: FBA return disposition
@@ -3722,9 +3758,10 @@ async function syncAndRerender(renderKey){
         ${importErrorBanner('product')}
         ${listToolbar('products')}
         ${!met?`<p style="color:var(--ink-soft);font-size:13px;padding:6px 0">Select a <b>Brand</b> to view its products, or use search.</p>`:''}
-        ${filtered.length?`<div class="table-scroll pm-scroll"><table class="pm-table">
-          <thead><tr><th>SKU</th><th>Product</th><th>Brand</th><th>Category</th><th class="num">Cost</th><th class="num">Price</th><th></th></tr></thead>
+        ${filtered.length?`${bulkBar('prd')}<div class="table-scroll pm-scroll"><table class="pm-table">
+          <thead><tr>${bulkSelectAllCell('prd',filtered.map(p=>p.sku))}<th>SKU</th><th>Product</th><th>Brand</th><th>Category</th><th class="num">Cost</th><th class="num">Price</th><th></th></tr></thead>
           <tbody>${filtered.map(p=>`<tr>
+            ${bulkCheckboxCell('prd',p.sku)}
             <td class="sku-cell">${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${esc(p.brand)}</td><td>${esc(p.category||'—')}</td>
             <td class="num mono">${inr(p.cost||0)}</td><td class="num mono">${inr(p.price||0)}</td>
             <td class="num"><button class="btn btn-ghost" style="padding:5px 9px" data-onclick="editProduct('${esc(p.sku)}')">Edit</button>
