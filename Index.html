@@ -2912,7 +2912,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
-    'renderAmazonAccountsTable', // Amazon Accounts admin (B1)
+    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzSaveBrands','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
     'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
@@ -3216,44 +3216,147 @@ function editUser(id){
    credential status, and last sync. Actions added in B2.
 ============================================================ */
 let AMZ_ACCOUNTS = [];   // [{id,name,marketplace_id,active,credentials_set,brands:[...],lastSync:{...}}]
+let AMZ_BUSY = false;   // guards against double-clicks during a save/sync
 RENDER.amazonaccounts=function(){
   if(!isAdmin()){ go('dashboard'); return; }
   setHead('Amazon Accounts','Each client’s Amazon Seller Central connection');
   C.innerHTML=`
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><div><h3>Register a new Amazon account</h3><div class="ch-sub">Add a client’s Seller Central, then map brands & load their SKU map below</div></div></div>
+      <div id="amz_err" class="field-error" style="display:none"></div>
+      <div class="form-grid">
+        <div class="fg-field"><label>Account name <span class="req">*</span></label><input id="amz_name" placeholder="e.g. Client C"></div>
+        <div class="fg-field"><label>Marketplace ID</label><input id="amz_mkt" value="A2VIGQ35RCS4UG" placeholder="UAE = A2VIGQ35RCS4UG"></div>
+      </div>
+      <button class="btn btn-teal" data-onclick="amzAddAccount()">Create account</button>
+    </div>
     <div class="card">
-      <div class="card-head"><div><h3>Connected Amazon accounts</h3><div class="ch-sub">One account per client · brands, credentials & last sync</div></div></div>
+      <div class="card-head"><div><h3>Connected Amazon accounts</h3><div class="ch-sub">One account per client · brands, credentials & last sync</div></div>
+        <div class="spacer"></div><button class="btn btn-ghost" data-onclick="amzRefresh()">Refresh</button></div>
       <div id="amzAcctBody"><p style="color:var(--ink-soft);font-size:13px;padding:8px 0">Loading accounts…</p></div>
     </div>`;
+  amzRefresh();
+};
+function amzRefresh(){
   if(window.LIVE && typeof liveLoadAmazonAccounts==='function'){
     liveLoadAmazonAccounts().then(renderAmazonAccountsTable).catch(e=>{
       const b=document.getElementById('amzAcctBody');
       if(b) b.innerHTML=`<p style="color:var(--bad);font-size:13px">Could not load accounts: ${esc((e&&e.message)||String(e))}</p>`;
     });
-  } else {
-    renderAmazonAccountsTable();
-  }
-};
+  } else { renderAmazonAccountsTable(); }
+}
 function renderAmazonAccountsTable(){
   const b=document.getElementById('amzAcctBody'); if(!b) return;
-  if(!AMZ_ACCOUNTS.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">No Amazon accounts yet.</p>`; return; }
-  b.innerHTML=`<div class="table-scroll"><table>
-    <thead><tr><th>Account</th><th>Marketplace</th><th>Brands</th><th>Credentials</th><th>Status</th><th>Last sync</th></tr></thead>
-    <tbody>${AMZ_ACCOUNTS.map(a=>{
-      const creds = a.credentials_set ? '<span class="pill ok">Set</span>' : '<span class="pill ret">Not set</span>';
-      const active = a.active ? '<span class="pill ok">Active</span>' : '<span class="pill over">Inactive</span>';
-      const brands = (a.brands&&a.brands.length) ? a.brands.map(esc).join(', ') : '<span style="color:var(--ink-soft)">—</span>';
-      const ls = a.lastSync;
-      const lastTxt = ls ? `${esc(fmtUpdated? fmtUpdated(ls.ran_at): ls.ran_at)} · ${esc(ls.status)}${(ls.orders!=null)?` · ${ls.orders} orders, ${ls.returns} ret`:''}` : '<span style="color:var(--ink-soft)">never</span>';
-      return `<tr>
-        <td class="sku-cell">${esc(a.name)}</td>
-        <td class="mono">${esc(a.marketplace_id||'')}</td>
-        <td>${brands}</td>
-        <td>${creds}</td>
-        <td>${active}</td>
-        <td style="font-size:12.5px">${lastTxt}</td>
-      </tr>`;}).join('')}</tbody>
-  </table></div>
-  <p style="color:var(--ink-soft);font-size:12px;margin-top:10px">Credentials are stored encrypted. This screen never shows them. Registering accounts and running syncs from here is coming next.</p>`;
+  if(!AMZ_ACCOUNTS.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">No Amazon accounts yet. Create one above.</p>`; return; }
+  b.innerHTML = AMZ_ACCOUNTS.map(a=>{
+    const creds = a.credentials_set ? '<span class="pill ok">Credentials set</span>' : '<span class="pill ret">No credentials</span>';
+    const active = a.active ? '<span class="pill ok">Active</span>' : '<span class="pill over">Inactive</span>';
+    const brands = (a.brands&&a.brands.length) ? a.brands.map(esc).join(', ') : '<span style="color:var(--ink-soft)">none mapped</span>';
+    const ls = a.lastSync;
+    const lastTxt = ls ? `${esc(fmtUpdated? fmtUpdated(ls.ran_at): ls.ran_at)} · ${esc(ls.status)}${(ls.orders!=null)?` · ${ls.orders} orders, ${ls.returns} ret`:''}` : '<span style="color:var(--ink-soft)">never synced</span>';
+    // brand checkboxes for mapping (a brand belongs to one account; show current selection)
+    const brandChecks = BRANDS.map(bn=>{
+      const on = (a.brands||[]).indexOf(bn)>=0;
+      return `<label class="bulk-selall" style="margin-right:12px"><input type="checkbox" class="bulk-chk" data-amz-brand="${esc(a.id)}" value="${esc(bn)}" ${on?'checked':''}>${esc(bn)}</label>`;
+    }).join('');
+    return `<div class="boe-card" style="margin-bottom:14px">
+      <div class="boe-head" style="cursor:default">
+        <div><div class="boe-label">ACCOUNT</div><div class="boe-no">${esc(a.name)}</div></div>
+        <div class="boe-meta">
+          <div><span>Marketplace</span><b class="mono">${esc(a.marketplace_id||'')}</b></div>
+          <div><span>Credentials</span><b>${creds}</b></div>
+          <div><span>Status</span><b>${active}</b></div>
+          <div><span>Last sync</span><b style="font-size:12px">${lastTxt}</b></div>
+        </div>
+      </div>
+      <div class="po-block">
+        <div style="margin-bottom:10px"><b style="font-size:13px">Brands</b> &nbsp; <span style="font-size:12.5px;color:var(--ink-soft)">${brands}</span></div>
+        <div style="margin-bottom:10px">${brandChecks||'<span style="color:var(--ink-soft);font-size:12px">No brands exist yet</span>'}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-ghost" data-onclick="amzSaveBrands('${esc(a.id)}')">Save brands</button>
+          <button class="btn btn-ghost" data-onclick="amzOpenCreds('${esc(a.id)}')">Save / update credentials</button>
+          <label class="btn btn-ghost" style="cursor:pointer;margin:0">Upload SKU map (CSV)
+            <input type="file" accept=".csv" style="display:none" data-onchange="amzUploadSku('${esc(a.id)}',this)"></label>
+          <button class="btn btn-teal" data-onclick="amzSyncNow('${esc(a.id)}')">Sync now</button>
+        </div>
+        <div id="amzcreds_${esc(a.id)}" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
+          <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Pasted here, encrypted on save. Never shown again.</div>
+          <div class="form-grid" style="margin-bottom:8px">
+            <div class="fg-field"><label>LWA Client ID</label><input id="cid_${esc(a.id)}" placeholder="amzn1.application-oa2-client…"></div>
+            <div class="fg-field"><label>LWA Client Secret</label><input id="csec_${esc(a.id)}" type="password" placeholder="secret"></div>
+            <div class="fg-field"><label>Refresh Token</label><input id="crt_${esc(a.id)}" type="password" placeholder="Atzr|…"></div>
+          </div>
+          <button class="btn btn-teal" data-onclick="amzSaveCreds('${esc(a.id)}')">Encrypt & save</button>
+          <button class="btn btn-ghost" data-onclick="amzOpenCreds('${esc(a.id)}')">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') + `<p style="color:var(--ink-soft);font-size:12px;margin-top:4px">Credentials are stored encrypted and never displayed. Client A uses its original secrets, so it correctly shows “No credentials”.</p>`;
+}
+// ---- actions ----
+function amzShowErr(m){ const e=document.getElementById('amz_err'); if(e){ e.textContent=m; e.style.display='block'; } else toast(m); }
+function amzAddAccount(){
+  const name=(document.getElementById('amz_name').value||'').trim();
+  const mkt=(document.getElementById('amz_mkt').value||'A2VIGQ35RCS4UG').trim();
+  if(!name){ amzShowErr('Enter an account name'); return; }
+  const e=document.getElementById('amz_err'); if(e) e.style.display='none';
+  if(!(window.LIVE && typeof liveAddAmazonAccount==='function')){ toast('Live connection needed'); return; }
+  liveAddAmazonAccount(name, mkt)
+    .then(()=>{ toast('Account created · '+name); document.getElementById('amz_name').value=''; amzRefresh(); })
+    .catch(err=>amzShowErr((err&&err.message)||'Could not create account'));
+}
+function amzSaveBrands(accountId){
+  const boxes=document.querySelectorAll('input[data-amz-brand="'+accountId+'"]');
+  const chosen=[...boxes].filter(b=>b.checked).map(b=>b.value);
+  if(!(window.LIVE && typeof liveSetAccountBrands==='function')){ toast('Live connection needed'); return; }
+  liveSetAccountBrands(accountId, chosen)
+    .then(()=>{ toast('Brands updated'); amzRefresh(); })
+    .catch(err=>toast((err&&err.message)||'Could not update brands'));
+}
+function amzOpenCreds(accountId){
+  const box=document.getElementById('amzcreds_'+accountId);
+  if(box) box.style.display = (box.style.display==='none'?'block':'none');
+}
+function amzSaveCreds(accountId){
+  if(AMZ_BUSY){ return; }
+  const cid=(document.getElementById('cid_'+accountId).value||'').trim();
+  const csec=(document.getElementById('csec_'+accountId).value||'').trim();
+  const crt=(document.getElementById('crt_'+accountId).value||'').trim();
+  if(!cid||!csec||!crt){ toast('Fill all three credential fields'); return; }
+  if(!(window.LIVE && typeof liveSaveAmazonCreds==='function')){ toast('Live connection needed'); return; }
+  AMZ_BUSY=true; toast('Encrypting & saving…');
+  liveSaveAmazonCreds(accountId, cid, csec, crt)
+    .then(()=>{ toast('Credentials encrypted & saved'); AMZ_BUSY=false; amzRefresh(); })
+    .catch(err=>{ AMZ_BUSY=false; toast((err&&err.message)||'Could not save credentials'); });
+}
+function amzSyncNow(accountId){
+  if(AMZ_BUSY){ return; }
+  if(!(window.LIVE && typeof liveSyncAccountNow==='function')){ toast('Live connection needed'); return; }
+  AMZ_BUSY=true; toast('Sync started…');
+  liveSyncAccountNow(accountId)
+    .then(res=>{ const r=(res&&res.results&&res.results[0])||{}; toast(`Sync done · ${r.orders||0} orders, ${r.returns||0} returns`); AMZ_BUSY=false; amzRefresh(); })
+    .catch(err=>{ AMZ_BUSY=false; toast((err&&err.message)||'Sync failed'); });
+}
+function amzUploadSku(accountId, input){
+  if(!(window.LIVE && typeof liveUploadAccountSkuMap==='function')){ toast('Live connection needed'); return; }
+  readFileThen(input, rows=>{
+    // expect header: amazon_seller_sku, asin, internal_sku, ...
+    if(rows.length<2){ toast('The file has no data rows'); return; }
+    const head=rows[0].map(h=>(h||'').toLowerCase().trim());
+    const iAmz=head.indexOf('amazon_seller_sku'), iAsin=head.indexOf('asin'), iInt=head.indexOf('internal_sku');
+    if(iAmz<0||iInt<0){ toast('CSV needs amazon_seller_sku and internal_sku columns'); return; }
+    const maps=[];
+    for(let r=1;r<rows.length;r++){
+      const c=rows[r]; const ssku=(c[iAmz]||'').trim(); const isku=(c[iInt]||'').trim();
+      if(!ssku||!isku) continue;   // skip blanks
+      maps.push({ seller_sku:ssku, asin:(iAsin>=0?(c[iAsin]||'').trim():''), internal_sku:isku });
+    }
+    if(!maps.length){ toast('No filled rows found (need Amazon SKU + internal SKU)'); return; }
+    toast(`Loading ${maps.length} mappings…`);
+    liveUploadAccountSkuMap(accountId, maps)
+      .then(res=>{ toast(`SKU map loaded · ${res.inserted} added${res.skipped?`, ${res.skipped} skipped`:''}`); amzRefresh(); })
+      .catch(err=>toast((err&&err.message)||'Could not load SKU map'));
+  });
 }
 
 RENDER.channels=function(){
@@ -3991,6 +4094,60 @@ async function liveLoadAmazonAccounts(){
     lastSync:lastByAcct[a.id]||null
   }));
   return AMZ_ACCOUNTS;
+}
+
+// ADMIN: create a new Amazon account row.
+async function liveAddAmazonAccount(name, marketplaceId){
+  const { error } = await sb.from('amazon_accounts').insert({ name, marketplace_id: marketplaceId||'A2VIGQ35RCS4UG', region:'eu', active:true });
+  if(error) throw error;
+}
+// ADMIN: set an account's brands (replace the set). A brand belongs to one account.
+async function liveSetAccountBrands(accountId, brandNames){
+  const ids = (brandNames||[]).map(n=>BRAND_ID[n]).filter(Boolean);
+  // remove existing links for this account, then insert the chosen ones.
+  await sb.from('account_brands').delete().eq('account_id', accountId);
+  if(ids.length){
+    const rows = ids.map(bid=>({ account_id:accountId, brand_id:bid }));
+    const { error } = await sb.from('account_brands').insert(rows);
+    if(error) throw error;
+  }
+}
+// ADMIN: save credentials via the crypto-helper edge function (encrypts them).
+async function liveSaveAmazonCreds(accountId, clientId, clientSecret, refreshToken){
+  const { data, error } = await sb.functions.invoke('crypto-helper', {
+    body: { action:'save', account_id:accountId, client_id:clientId, client_secret:clientSecret, refresh_token:refreshToken }
+  });
+  if(error) throw new Error(error.message||'crypto-helper failed');
+  if(data && data.ok===false) throw new Error(data.error||'Save failed');
+}
+// ADMIN: run the account-aware sync for one account.
+async function liveSyncAccountNow(accountId){
+  const { data, error } = await sb.functions.invoke('amazon-sync-v2', { body: { account_id:accountId } });
+  if(error) throw new Error(error.message||'sync failed');
+  if(data && data.ok===false) throw new Error(data.error||'Sync failed');
+  return data;
+}
+// ADMIN: load an account's SKU map (Amazon seller-SKU -> internal product), scoped to the account.
+async function liveUploadAccountSkuMap(accountId, maps){
+  let inserted=0, skipped=0;
+  // resolve internal SKUs to product_ids
+  const skus=[...new Set(maps.map(m=>m.internal_sku))];
+  const { data: prods } = await sb.from('products').select('id,sku').in('sku', skus);
+  const idBySku={}; (prods||[]).forEach(p=>idBySku[p.sku]=p.id);
+  const rows=[];
+  for(const m of maps){
+    const pid=idBySku[m.internal_sku];
+    if(!pid){ skipped++; continue; }   // internal SKU not found
+    rows.push({ account_id:accountId, product_id:pid, seller_sku:m.seller_sku, asin:m.asin||null });
+  }
+  // insert in chunks, ignoring duplicates (unique on account_id+seller_sku)
+  for(let i=0;i<rows.length;i+=200){
+    const chunk=rows.slice(i,i+200);
+    const { error } = await sb.from('amazon_sku_map').upsert(chunk, { onConflict:'account_id,seller_sku', ignoreDuplicates:true });
+    if(error) throw error;
+    inserted += chunk.length;
+  }
+  return { inserted, skipped };
 }
 
 async function liveLoadAll(){
