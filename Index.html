@@ -4179,7 +4179,9 @@ function _enhanceListPage(renderName, buildCfg){
 }
 // DOM-based: injects toolbar and filters rows by their visible text — no render-function changes needed.
 function _injectToolbarAndFilter(cfg){
-  const tables = C.querySelectorAll('table');
+  const _cEl = document.getElementById('content');
+  if(!_cEl) return;
+  const tables = _cEl.querySelectorAll('table');
   if(!tables.length) return;
   const table = cfg.tableIndex!=null ? tables[cfg.tableIndex] : tables[tables.length-1];
   if(!table) return;
