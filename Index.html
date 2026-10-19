@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ENTOEN PARTNER DASHBOARD</title>
+<title>StockPulse — Inventory & Sales Command Center</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{
@@ -951,7 +951,7 @@ const NAV = [
     {id:'products', label:'Products', icon:'box', adminOnly:true},
     {id:'warehouses', label:'Warehouses', icon:'building', adminOnly:true},
     {id:'channels', label:'Sales Channels', icon:'tag', adminOnly:true},
-    {id:'users', label:'Users', icon:'users', adminOnly:true},
+    {id:'users', label:'Clients', icon:'users', adminOnly:true},
     {id:'amazonaccounts', label:'Amazon Accounts', icon:'repeat', adminOnly:true},
   ]},
 ];
@@ -2795,12 +2795,12 @@ function removeWarehouse(w){ if(STOCK.some(s=>s.wh===w&&s.qty!==0)){ toast('That
 ============================================================ */
 RENDER.users=function(){
   if(!isAdmin()){ go('dashboard'); return; }
-  setHead('Users','Create client logins & control data access');
+  setHead('Clients','Create client accounts & control data access');
   const clients=USERS.filter(u=>u.role==='brand');
   C.innerHTML=`
   <div class="grid-2b" style="grid-template-columns:1fr 1.4fr">
     <div class="card">
-      <div class="card-head"><div><h3>Create client user</h3><div class="ch-sub">They set their own password on first login</div></div></div>
+      <div class="card-head"><div><h3>Create client</h3><div class="ch-sub">They set their own password on first login</div></div></div>
       <div id="u_err" class="field-error" style="display:none"></div>
       <div class="form-grid" style="grid-template-columns:1fr">
         <div class="fg-field"><label>Full name / Company</label><input id="u_name" placeholder="Brand name"></div>
@@ -2818,11 +2818,11 @@ RENDER.users=function(){
           <div class="brand-check-grid">${BRANDS.map(b=>`<label class="brand-check"><input type="checkbox" class="u_brand_cb" value="${esc(b)}"> ${esc(b)}</label>`).join('')||'<span style="color:var(--ink-soft);font-size:12.5px">Create a brand first</span>'}</div>
         </div>
       </div>
-      <button class="btn btn-teal" style="width:100%;justify-content:center" data-onclick="createUser()">Create user</button>
-      <p style="font-size:11.5px;color:var(--ink-soft);margin-top:12px">The user logs in with this temporary password, is required to set a new one, then sees data for all assigned brands.</p>
+      <button class="btn btn-teal" style="width:100%;justify-content:center" data-onclick="createUser()">Create client</button>
+      <p style="font-size:11.5px;color:var(--ink-soft);margin-top:12px">The client logs in with this temporary password, is required to set a new one, then sees data for all assigned brands.</p>
     </div>
     <div class="card">
-      <div class="card-head"><div><h3>All users</h3><div class="ch-sub">${USERS.length} accounts · ${clients.length} clients</div></div></div>
+      <div class="card-head"><div><h3>All clients</h3><div class="ch-sub">${clients.length} client${clients.length===1?'':'s'} · ${USERS.length} total accounts</div></div></div>
       <div class="table-scroll"><table>
         <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Data scope</th><th>Status</th><th></th></tr></thead>
         <tbody>${USERS.map(u=>`<tr><td class="sku-cell">${esc(u.name)}</td><td class="mono" style="font-size:12.5px">${esc(u.email)}</td>
@@ -2881,10 +2881,10 @@ function createUser(){
   clearFieldError('u_err');
   USERS.push({id:'U-'+String(USERS.length+1).padStart(3,'0'),name,email,pass,role:'brand',brands,active:true,mustReset:true,logo:_pendingUserLogo||''});
   _pendingUserLogo=''; // FEATURE 7: reset after use
-  toast(`User created · ${name} → ${brands.join(', ')} (must reset password on first login)`);
+  toast(`Client created · ${name} → ${brands.join(', ')} (must reset password on first login)`);
   RENDER.users();
 }
-function toggleUser(id){ const u=USERS.find(x=>x.id===id); if(!u)return; u.active=!u.active; toast(u.active?'User enabled':'User disabled'); RENDER.users(); }
+function toggleUser(id){ const u=USERS.find(x=>x.id===id); if(!u)return; u.active=!u.active; toast(u.active?'Client enabled':'Client disabled'); RENDER.users(); }
 function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; const n=USERS[i].name; USERS.splice(i,1); toast('Deleted '+n); RENDER.users(); }
 
 /* ============================================================
@@ -3091,7 +3091,7 @@ function askRemoveBrand(b){
   confirmAction(msg, ()=>removeBrand(b));
 }
 function askRemoveWarehouse(w){ confirmAction(`Are you sure you want to delete the warehouse "${w}"? This cannot be undone.`, ()=>removeWarehouse(w)); }
-function askDeleteUser(id){ const u=(USERS.find(x=>x.id===id)||{}); confirmAction(`Are you sure you want to delete the user "${u.name||''}"? This cannot be undone.`, ()=>deleteUser(id)); }
+function askDeleteUser(id){ const u=(USERS.find(x=>x.id===id)||{}); confirmAction(`Are you sure you want to delete the client "${u.name||''}"? This cannot be undone.`, ()=>deleteUser(id)); }
 function askDeleteInward(id){ confirmAction('Are you sure you want to delete this inward record? Stock will be reversed.', ()=>deleteInward(id)); }
 function askDeleteOutward(id){ confirmAction('Are you sure you want to delete this sale? Stock will be returned.', ()=>deleteOutward(id)); }
 function askDeleteChannel(ch){ confirmAction(`Are you sure you want to delete the channel "${ch}"?`, ()=>removeChannel(ch)); }
@@ -3173,7 +3173,7 @@ function editUser(id){
   // FIXED (Issue 4): the edit form now supports uploading / changing / removing the partner logo.
   _pendingEditLogo = (u.logo||'');   // start from the current logo; picker overwrites this
   const hasLogo = !!(u.logo);
-  openModal('Edit user',
+  openModal('Edit client',
     `<div class="fg-field"><label>Full name / Company <span class="req">*</span></label><input id="edit_uname" value="${esc(u.name)}"></div>
      <div class="fg-field"><label>Login email <span class="req">*</span></label><input id="edit_uemail" type="email" value="${esc(u.email)}"></div>
      <div class="fg-field"><label>Assign brands <span class="req">*</span></label><div class="brand-check-grid">${checks}</div></div>
@@ -4699,16 +4699,16 @@ async function liveDeleteTransfer(id){
     try{
       await liveCreateUser({ name, email, pass, brands, logo:_pendingUserLogo||'' }); // FEATURE 7
       _pendingUserLogo='';
-      toast(`User created · ${name} → ${brands.join(', ')}`); RENDER.users();
+      toast(`Client created · ${name} → ${brands.join(', ')}`); RENDER.users();
     }catch(e){ showFieldError('u_err', e.message||'Could not create user'); }
   };
   window.toggleUser = async function(id){
     const u=USERS.find(x=>x.id===id); if(!u) return;
-    try{ await liveSetUserActive(id, !u.active); toast(!u.active?'User enabled':'User disabled'); RENDER.users(); }
+    try{ await liveSetUserActive(id, !u.active); toast(!u.active?'Client enabled':'Client disabled'); RENDER.users(); }
     catch(e){ toast(e.message||'Could not update user'); }
   };
   // deleting an auth user needs admin API; disable in-browser delete when live
-  window.deleteUser = function(){ toast('Disable the user instead, or remove them in Supabase → Authentication'); };
+  window.deleteUser = function(){ toast('Disable the client instead, or remove them in Supabase → Authentication'); };
 
   // ---------- TRANSFER delete (Issue 5, live) ----------
   window.deleteTransfer = async function(id){
