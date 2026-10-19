@@ -2885,6 +2885,7 @@ RENDER.users=function(){
           <td class="num mono">${u.role==='admin'?'—':subUsersOf(u.id).length}</td>
           <td>${u.active?(u.mustReset?'<span class="pill over">Pending reset</span>':'<span class="pill ok">Active</span>'):'<span class="pill low">Disabled</span>'}</td>
           <td class="num">${u.role==='admin'?'':`<button class="btn btn-ghost" style="padding:6px 10px" data-onclick="editUser('${u.id}')">Edit</button>
+            <button class="btn btn-ghost" style="padding:6px 10px" data-onclick="clientWhOpen('${u.id}')">Warehouses</button>
             <button class="btn btn-ghost" style="padding:6px 10px" data-onclick="toggleUser('${u.id}')">${u.active?'Disable':'Enable'}</button>
             <button class="btn btn-ghost btn-del" style="padding:6px 10px" data-onclick="askDeleteUser('${u.id}')">Delete</button>`}</td></tr>`).join('')}</tbody>
       </table></div>
@@ -3002,7 +3003,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
     'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzClientPicked','amzSyncBrandsFromClient','amzDeleteAccount','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
-    'subAddOpen','subToggle','subResetPw', // Stage 5C: sub-user management
+    'subAddOpen','subToggle','subResetPw','clientWhOpen', // Stage 5C: sub-user & warehouse management
     'clientsOnly','isSubUser','subUsersOf', // Stage 5 helpers
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
@@ -3471,6 +3472,34 @@ function amzDeleteAccount(accountId){
 function amzOpenCreds(accountId){
   const box=document.getElementById('amzcreds_'+accountId);
   if(box) box.style.display = (box.style.display==='none'?'block':'none');
+}
+
+/* ===== Assign warehouses to a client ===== */
+function clientWhOpen(clientId){
+  const c=clientsOnly().find(u=>String(u.id)===String(clientId)); if(!c){ toast('Client not found'); return; }
+  const mine=new Set(CLIENT_WH[clientId]||[]);
+  // which warehouses are owned by a DIFFERENT client (for display only)
+  const ownerOf={}; Object.keys(CLIENT_WH).forEach(pid=>{ (CLIENT_WH[pid]||[]).forEach(w=>{ ownerOf[w]=pid; }); });
+  const rows = WAREHOUSES.map(w=>{
+    const owner=ownerOf[w];
+    const takenByOther = owner && String(owner)!==String(clientId);
+    const ownerName = takenByOther ? ((USERS.find(u=>String(u.id)===String(owner))||{}).name||'another client') : '';
+    return `<label class="brand-check" style="${takenByOther?'opacity:.55':''}">
+      <input type="checkbox" class="cwh_cb" value="${esc(w)}" ${mine.has(w)?'checked':''} ${takenByOther?'disabled':''}>
+      ${esc(w)}${takenByOther?` <span style="font-size:11px;color:var(--ink-soft)">· ${esc(ownerName)}</span>`:''}</label>`;
+  }).join('') || '<span style="color:var(--ink-soft);font-size:12.5px">No warehouses exist yet. Create warehouses first.</span>';
+  openModal('Warehouses · '+c.name,
+    `<div class="fg-field"><label>Assign warehouses to this client — tick one or more</label>
+      <div class="brand-check-grid">${rows}</div></div>
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">A warehouse belongs to one client only. Greyed-out warehouses are already owned by another client. This client (and its sub-users) will see data only for the ticked warehouses.</p>`,
+    ()=>{
+      const chosen=[...document.querySelectorAll('.cwh_cb')].filter(x=>x.checked&&!x.disabled).map(x=>x.value);
+      if(!(window.LIVE && typeof liveSetClientWarehouses==='function')){ toast('Live connection needed'); return; }
+      const btn=document.getElementById('modalSave'); if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
+      liveSetClientWarehouses(clientId, chosen)
+        .then(res=>{ const sk=(res&&res.skipped)||[]; closeModal(); toast('Warehouses updated · '+c.name+(sk.length?` (${sk.length} skipped)`:'')); buildWhFilter(); RENDER.users(); })
+        .catch(err=>{ showFieldError('modalErr',(err&&err.message)||'Could not update warehouses'); if(btn){ btn.disabled=false; btn.textContent='Save'; } });
+    }, 'Save warehouses', 'modal-wide');
 }
 
 /* ===== Stage 5C: Sub-user management ===== */
@@ -4434,22 +4463,42 @@ async function liveLoadAll(){
   if (isAdmin()) { await liveLoadUsers(); await liveLoadClientWarehouses(); }
 }
 // Build CLIENT_WH { clientProfileId : [warehouse names] } for the admin client filter.
-// Bridge: client profile --(name match)--> amazon_accounts --> client_warehouses --> warehouses.
+// Warehouses are linked directly to the client profile (client_warehouses.profile_id).
 async function liveLoadClientWarehouses(){
   CLIENT_WH = {};
   if(!LIVE || !isAdmin()) return CLIENT_WH;
   try{
-    const { data: accts } = await sb.from('amazon_accounts').select('id,name');
-    const { data: links } = await sb.from('client_warehouses').select('account_id, warehouses(name)');
-    const whByAcct = {};
-    (links||[]).forEach(l=>{ const n=l.warehouses?l.warehouses.name:null; if(!n) return; (whByAcct[l.account_id]=whByAcct[l.account_id]||[]).push(n); });
-    // account name -> warehouse names
-    const whByAcctName = {};
-    (accts||[]).forEach(a=>{ whByAcctName[a.name]=(whByAcct[a.id]||[]).slice(); });
-    // map onto client profiles by matching name
-    clientsOnly().forEach(u=>{ CLIENT_WH[u.id]=(whByAcctName[u.name]||[]).slice(); });
+    const { data: links } = await sb.from('client_warehouses').select('profile_id, warehouses(name)');
+    (links||[]).forEach(l=>{
+      const n=l.warehouses?l.warehouses.name:null; const pid=l.profile_id;
+      if(!n||!pid) return;
+      (CLIENT_WH[pid]=CLIENT_WH[pid]||[]).push(n);
+    });
   }catch(e){ /* keep empty on failure */ }
   return CLIENT_WH;
+}
+// Replace a client's warehouse set. A warehouse belongs to one client only;
+// warehouses owned by a DIFFERENT client are skipped and reported in {skipped}.
+async function liveSetClientWarehouses(profileId, warehouseNames){
+  const wantIds = (warehouseNames||[]).map(n=>({name:n, id:WH_ID[n]})).filter(x=>x.id);
+  const idList = wantIds.map(x=>x.id);
+  let skipped=[];
+  if(idList.length){
+    const { data: existing } = await sb.from('client_warehouses')
+      .select('warehouse_id, profile_id').in('warehouse_id', idList);
+    const ownedElse = new Set((existing||[]).filter(r=>String(r.profile_id)!==String(profileId)).map(r=>r.warehouse_id));
+    skipped = wantIds.filter(x=>ownedElse.has(x.id)).map(x=>x.name);
+  }
+  const insertIds = wantIds.filter(x=>!skipped.includes(x.name)).map(x=>x.id);
+  // clear this client's current links, then insert the chosen ones.
+  await sb.from('client_warehouses').delete().eq('profile_id', profileId);
+  if(insertIds.length){
+    const rows = insertIds.map(wid=>({ profile_id:profileId, warehouse_id:wid }));
+    const { error } = await sb.from('client_warehouses').insert(rows);
+    if(error) throw error;
+  }
+  await liveLoadClientWarehouses();
+  return { skipped };
 }
 // Load client/admin profiles into USERS (admin only). Split out so the
 // Amazon Accounts client-picker can refresh clients without a full reload.
