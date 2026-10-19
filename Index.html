@@ -527,6 +527,12 @@ th.bulk-col,td.bulk-col{width:34px;text-align:center;padding-left:10px;padding-r
       <div class="spacer"></div>
       <!-- ADDED (Issue 3): Last Updated Date & Time -->
       <div class="last-updated" id="lastUpdated">Last updated: —</div>
+      <div class="chip-filter" id="clientFilterChip" style="display:none">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+        <select id="clientFilter" data-onchange="applyClientFilter()">
+          <option value="all">All Clients</option>
+        </select>
+      </div>
       <div class="chip-filter">
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
         <select id="whFilter" data-onchange="applyFilters()">
@@ -553,6 +559,8 @@ const RENDER = {};
 let CURRENT = null;               // logged-in user
 let ROLE = 'admin';
 let WH_FILTER = 'all';            // top-right warehouse filter
+let CLIENT_FILTER = 'all';        // top-right client filter (admin only). 'all' = every client.
+let CLIENT_WH = {};               // { clientProfileId : [warehouse names] }  (from client_warehouses)
 let AMAZON_COMMISSION = 0.30;
 /* Per-order commission: use the AED amount recorded with the order (from the sales
    template's Commission column). Manual entries without an amount fall back to 0. */
@@ -639,26 +647,42 @@ function ensureProduct(sku, name, brand){
   return p;
 }
 
-/* --- warehouse filter awareness --- */
-function whMatch(wh){ return WH_FILTER==='all' || wh===WH_FILTER; }
+/* --- client filter awareness (admin only) ---
+   When the Super Admin picks a specific client in the top bar, every page is
+   narrowed to THAT client's brands and warehouses. 'all' = see everything. */
+function clientFilterActive(){ return isAdmin() && CLIENT_FILTER && CLIENT_FILTER!=='all'; }
+function clientFilterUser(){ return clientFilterActive() ? (USERS||[]).find(u=>String(u.id)===String(CLIENT_FILTER)) : null; }
+function clientFilterBrands(){ const c=clientFilterUser(); return c?(c.brands||[]):[]; }
+function clientFilterWarehouses(){ return clientFilterActive() ? (CLIENT_WH[CLIENT_FILTER]||[]) : []; }
+/* brand/warehouse membership tests that fold in the client filter */
+function brandInClientFilter(brand){ return !clientFilterActive() || clientFilterBrands().includes(brand); }
+function whInClientFilter(wh){ return !clientFilterActive() || clientFilterWarehouses().includes(wh); }
+
+/* --- warehouse filter awareness (warehouse dropdown + client filter) --- */
+function whMatch(wh){ return (WH_FILTER==='all' || wh===WH_FILTER) && whInClientFilter(wh); }
 
 /* --- scoped + filtered views --- */
-function scopeProducts(){ return isAdmin() ? PRODUCTS : PRODUCTS.filter(p=>inMyBrands(p.brand)); }
+function scopeProducts(){
+  if(!isAdmin()) return PRODUCTS.filter(p=>inMyBrands(p.brand));
+  return clientFilterActive() ? PRODUCTS.filter(p=>brandInClientFilter(p.brand)) : PRODUCTS;
+}
 function scopeStock(){
   const skus = new Set(scopeProducts().map(p=>p.sku));
   return STOCK.filter(s=>skus.has(s.sku) && whMatch(s.wh));
 }
 function scopeInward(){
   const skus = new Set(scopeProducts().map(p=>p.sku));
-  return INWARD.filter(r=>(isAdmin()? true : skus.has(r.sku)) && whMatch(r.wh));
+  return INWARD.filter(r=>((isAdmin() && !clientFilterActive())? true : skus.has(r.sku)) && whMatch(r.wh));
 }
 function scopeOutward(){
   const skus = new Set(scopeProducts().map(p=>p.sku));
-  return OUTWARD.filter(o=>(isAdmin()? true : skus.has(o.sku)) && whMatch(o.wh));
+  return OUTWARD.filter(o=>((isAdmin() && !clientFilterActive())? true : skus.has(o.sku)) && whMatch(o.wh));
 }
 function scopeTransfers(){
   const skus = new Set(scopeProducts().map(p=>p.sku));
-  return TRANSFERS.filter(t=>(isAdmin()? true : skus.has(t.sku)) && (WH_FILTER==='all'||t.from===WH_FILTER||t.to===WH_FILTER));
+  return TRANSFERS.filter(t=>((isAdmin() && !clientFilterActive())? true : skus.has(t.sku))
+    && (WH_FILTER==='all'||t.from===WH_FILTER||t.to===WH_FILTER)
+    && (!clientFilterActive() || whInClientFilter(t.from) || whInClientFilter(t.to)));
 }
 function stockQty(sku,wh){ const r=STOCK.find(s=>s.sku===sku&&s.wh===wh); return r?r.qty:0; }
 // REQ 3/4 FIX: authoritative balance for a SKU (optionally one warehouse), computed the SAME way
@@ -885,13 +909,14 @@ function proceedLoginWithSessionCheck(user, enter){
   markSessionActive(user); enter();
 }
 function enterApp(user){
-  CURRENT=user; ROLE=user.role; WH_FILTER='all';
+  CURRENT=user; ROLE=user.role; WH_FILTER='all'; CLIENT_FILTER='all';
   document.getElementById('login').style.display='none';
   document.getElementById('app').classList.add('show');
   const initials=user.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
   document.getElementById('userAv').textContent=initials;
   document.getElementById('userName').textContent=user.name;
   document.getElementById('userRole').textContent=isAdmin()?'Administrator':(myBrandLabel()+' · Client');
+  buildClientFilter();
   buildWhFilter();
   buildNav();
   // ADDED (Issue 3): render stored last-updated on entry
@@ -919,9 +944,24 @@ function logout(){
 ============================================================ */
 function buildWhFilter(){
   const sel=document.getElementById('whFilter');
-  const list = isAdmin() ? WAREHOUSES : WAREHOUSES; // clients see all warehouses too
+  // When a client is selected, the warehouse dropdown lists ONLY that client's warehouses.
+  const list = clientFilterActive() ? clientFilterWarehouses() : WAREHOUSES;
   sel.innerHTML = `<option value="all">All Warehouses</option>` + list.map(w=>`<option value="${esc(w)}">${esc(w)}</option>`).join('');
+  // keep current selection if still valid, else reset to all
+  if(WH_FILTER!=='all' && !list.includes(WH_FILTER)) WH_FILTER='all';
   sel.value = WH_FILTER;
+}
+/* Build the admin Client dropdown and show its chip (admin only). */
+function buildClientFilter(){
+  const chip=document.getElementById('clientFilterChip');
+  const sel=document.getElementById('clientFilter');
+  if(!chip||!sel) return;
+  if(!isAdmin()){ chip.style.display='none'; return; }
+  chip.style.display='';
+  const clients=clientsOnly().slice().sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  sel.innerHTML = `<option value="all">All Clients</option>` + clients.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  if(CLIENT_FILTER!=='all' && !clients.some(c=>String(c.id)===String(CLIENT_FILTER))) CLIENT_FILTER='all';
+  sel.value = CLIENT_FILTER;
 }
 function applyFilters(){
   WH_FILTER = document.getElementById('whFilter').value;
@@ -929,6 +969,18 @@ function applyFilters(){
   const page = active ? active.dataset.page : 'dashboard';
   RENDER[page]();
   toast(WH_FILTER==='all' ? 'Showing all warehouses' : 'Filtered to '+WH_FILTER);
+}
+/* Super Admin picks a client: narrow brands + warehouses, rebuild the warehouse
+   dropdown to that client's warehouses, and re-render the current page. */
+function applyClientFilter(){
+  CLIENT_FILTER = document.getElementById('clientFilter').value;
+  WH_FILTER='all';            // reset warehouse choice when client changes
+  buildWhFilter();
+  const active = document.querySelector('.nav-item.active');
+  const page = active ? active.dataset.page : 'dashboard';
+  if(RENDER[page]) RENDER[page]();
+  const c=clientFilterUser();
+  toast(CLIENT_FILTER==='all' ? 'Showing all clients' : 'Filtered to '+((c&&c.name)||'client'));
 }
 
 /* ============================================================
@@ -1100,7 +1152,7 @@ const hasData = () => PRODUCTS.length>0 || INWARD.length>0 || OUTWARD.length>0;
 
 /* ---------- DASHBOARD ---------- */
 RENDER.dashboard=function(){
-  setHead('Dashboard', (isAdmin()?'All brands':myBrandLabel())+(WH_FILTER==='all'?'':' · '+WH_FILTER));
+  setHead('Dashboard', (isAdmin()?(clientFilterActive()?((clientFilterUser()||{}).name||'Client'):'All brands'):myBrandLabel())+(WH_FILTER==='all'?'':' · '+WH_FILTER));
   const stock=scopeStock(), out=scopeOutward();
   const totalUnits=stock.reduce((s,r)=>s+r.qty,0);
   const stockValue=stock.reduce((s,r)=>s+stockLineValue(r),0); // FIXED: inward cost
@@ -2768,6 +2820,7 @@ function removeBrand(b){
 RENDER.warehouses=function(){
   if(!isAdmin()){ go('dashboard'); return; }
   setHead('Warehouses','Create and manage warehouses');
+  const whList = clientFilterActive() ? WAREHOUSES.filter(w=>whInClientFilter(w)) : WAREHOUSES;
   C.innerHTML=`
   <div class="grid-2b" style="grid-template-columns:1fr 1.4fr">
     <div class="card">
@@ -2778,12 +2831,12 @@ RENDER.warehouses=function(){
       <button class="btn btn-teal" style="width:100%;justify-content:center" data-onclick="addWarehouse()">Create warehouse</button>
     </div>
     <div class="card">
-      <div class="card-head"><div><h3>All warehouses</h3><div class="ch-sub">${WAREHOUSES.length} locations</div></div></div>
-      ${WAREHOUSES.length?`<div class="table-scroll"><table><thead><tr><th>Warehouse</th><th class="num">Stock lines</th><th class="num">Units</th><th></th></tr></thead>
-        <tbody>${WAREHOUSES.map(w=>{const lines=STOCK.filter(s=>s.wh===w);return `<tr><td class="sku-cell">${esc(w)}</td><td class="num mono">${lines.length}</td><td class="num mono">${lines.reduce((s,r)=>s+r.qty,0).toLocaleString('en-AE')}</td>
+      <div class="card-head"><div><h3>All warehouses</h3><div class="ch-sub">${(clientFilterActive()?whList.length+' of '+WAREHOUSES.length+' — '+esc((clientFilterUser()||{}).name||'client'):WAREHOUSES.length+' locations')}</div></div></div>
+      ${whList.length?`<div class="table-scroll"><table><thead><tr><th>Warehouse</th><th class="num">Stock lines</th><th class="num">Units</th><th></th></tr></thead>
+        <tbody>${whList.map(w=>{const lines=STOCK.filter(s=>s.wh===w);return `<tr><td class="sku-cell">${esc(w)}</td><td class="num mono">${lines.length}</td><td class="num mono">${lines.reduce((s,r)=>s+r.qty,0).toLocaleString('en-AE')}</td>
         <td class="num"><button class="btn btn-ghost" style="padding:6px 10px" data-onclick="editWarehouse('${esc(w)}')">Edit</button>
         <button class="btn btn-ghost btn-del" style="padding:6px 10px" data-onclick="askRemoveWarehouse('${esc(w)}')">Delete</button></td></tr>`;}).join('')}</tbody></table></div>`
-        :`<p style="color:var(--ink-soft);font-size:13px">No warehouses yet. Create one so you can receive and dispatch stock.</p>`}
+        :`<p style="color:var(--ink-soft);font-size:13px">${clientFilterActive()?'This client has no warehouses linked yet.':'No warehouses yet. Create one so you can receive and dispatch stock.'}</p>`}
     </div>
   </div>`;
 };
@@ -2795,8 +2848,9 @@ function removeWarehouse(w){ if(STOCK.some(s=>s.wh===w&&s.qty!==0)){ toast('That
 ============================================================ */
 RENDER.users=function(){
   if(!isAdmin()){ go('dashboard'); return; }
-  setHead('Clients','Create client accounts & control data access');
-  const clients=USERS.filter(u=>u.role==='brand');
+  setHead('Clients','Create client accounts, sub-users & control data access');
+  const clients=clientsOnly();
+  const admins=USERS.filter(u=>u.role==='admin');
   C.innerHTML=`
   <div class="grid-2b" style="grid-template-columns:1fr 1.4fr">
     <div class="card">
@@ -2822,18 +2876,53 @@ RENDER.users=function(){
       <p style="font-size:11.5px;color:var(--ink-soft);margin-top:12px">The client logs in with this temporary password, is required to set a new one, then sees data for all assigned brands.</p>
     </div>
     <div class="card">
-      <div class="card-head"><div><h3>All clients</h3><div class="ch-sub">${clients.length} client${clients.length===1?'':'s'} · ${USERS.length} total accounts</div></div></div>
+      <div class="card-head"><div><h3>All clients</h3><div class="ch-sub">${clients.length} client${clients.length===1?'':'s'} · ${admins.length} admin${admins.length===1?'':'s'}</div></div></div>
       <div class="table-scroll"><table>
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Data scope</th><th>Status</th><th></th></tr></thead>
-        <tbody>${USERS.map(u=>`<tr><td class="sku-cell">${esc(u.name)}</td><td class="mono" style="font-size:12.5px">${esc(u.email)}</td>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Data scope</th><th>Sub-users</th><th>Status</th><th></th></tr></thead>
+        <tbody>${admins.concat(clients).map(u=>`<tr><td class="sku-cell">${esc(u.name)}</td><td class="mono" style="font-size:12.5px">${esc(u.email)}</td>
           <td>${u.role==='admin'?'<span class="tag amazon">Admin</span>':'<span class="tag offline">Client</span>'}</td>
           <td>${u.role==='admin'?'<span style="color:var(--ink-soft)">All brands</span>':esc((u.brands||[]).join(', '))}</td>
+          <td class="num mono">${u.role==='admin'?'—':subUsersOf(u.id).length}</td>
           <td>${u.active?(u.mustReset?'<span class="pill over">Pending reset</span>':'<span class="pill ok">Active</span>'):'<span class="pill low">Disabled</span>'}</td>
           <td class="num">${u.role==='admin'?'':`<button class="btn btn-ghost" style="padding:6px 10px" data-onclick="editUser('${u.id}')">Edit</button>
             <button class="btn btn-ghost" style="padding:6px 10px" data-onclick="toggleUser('${u.id}')">${u.active?'Disable':'Enable'}</button>
             <button class="btn btn-ghost btn-del" style="padding:6px 10px" data-onclick="askDeleteUser('${u.id}')">Delete</button>`}</td></tr>`).join('')}</tbody>
       </table></div>
     </div>
+  </div>
+
+  <!-- Stage 5C: Sub-user management, grouped by client -->
+  <div class="card" style="margin-top:16px">
+    <div class="card-head"><div><h3>Sub-users</h3><div class="ch-sub">Individual logins under each client · each sees only that client’s data</div></div></div>
+    ${clients.length ? clients.map(c=>{
+      const subs=subUsersOf(c.id);
+      return `<div class="boe-card" style="margin-bottom:14px">
+        <div class="boe-head" style="cursor:default">
+          <div><div class="boe-label">CLIENT</div><div class="boe-no">${esc(c.name)}</div></div>
+          <div class="boe-meta">
+            <div><span>Brands</span><b style="font-size:12px">${esc((c.brands||[]).join(', ')||'none')}</b></div>
+            <div><span>Sub-users</span><b>${subs.length}</b></div>
+          </div>
+        </div>
+        <div class="po-block">
+          ${subs.length?`<div class="table-scroll"><table>
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead>
+            <tbody>${subs.map(s=>`<tr>
+              <td class="sku-cell">${esc(s.name)}</td>
+              <td class="mono" style="font-size:12.5px">${esc(s.email)}</td>
+              <td>${s.subRole==='viewer'?'<span class="tag offline">Viewer</span>':'<span class="tag amazon">Manager</span>'}</td>
+              <td>${s.active?(s.mustReset?'<span class="pill over">Pending reset</span>':'<span class="pill ok">Active</span>'):'<span class="pill low">Disabled</span>'}</td>
+              <td class="num">
+                <button class="btn btn-ghost" style="padding:6px 10px" data-onclick="subToggle('${s.id}')">${s.active?'Disable':'Enable'}</button>
+                <button class="btn btn-ghost" style="padding:6px 10px" data-onclick="subResetPw('${s.id}')">Reset password</button>
+              </td></tr>`).join('')}</tbody></table></div>`
+            :`<p style="color:var(--ink-soft);font-size:12.5px;margin:0 0 10px">No sub-users yet for this client.</p>`}
+          <div style="margin-top:10px">
+            <button class="btn btn-teal" data-onclick="subAddOpen('${c.id}')">+ Add sub-user</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('') : `<p style="color:var(--ink-soft);font-size:13px">Create a client first, then add sub-users under it.</p>`}
   </div>`;
 };
 // UPDATED (Feature 4): email format validation with clear error
@@ -2892,7 +2981,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
 ============================================================ */
 (function(){
   var names=['doLogin','logout','loginError','showPasswordReset','submitPasswordReset','enterApp',
-    'go','openNav','closeNav','applyFilters','buildWhFilter','buildNav','setHead','toast','downloadCSV',
+    'go','openNav','closeNav','applyFilters','applyClientFilter','buildWhFilter','buildClientFilter','buildNav','setHead','toast','downloadCSV',
     'downloadInwardTemplate','downloadOutwardTemplate','emptyState','kpi','lineOpts','barOpts','stockPill','topSkus',
     'inwardPick','inwardCalc','saveInward','saveProduct','exportInward','filterInv','exportInv',
     'parseCSV','readFileThen','handleInwardUpload','handleOutwardUpload','handleSettlementUpload','parseSettlementReport',
@@ -2912,7 +3001,9 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
-    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzClientPicked','amzSyncBrandsFromClient','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
+    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzClientPicked','amzSyncBrandsFromClient','amzDeleteAccount','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
+    'subAddOpen','subToggle','subResetPw', // Stage 5C: sub-user management
+    'clientsOnly','isSubUser','subUsersOf', // Stage 5 helpers
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
     'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
@@ -3260,8 +3351,11 @@ function amzRefresh(){
 }
 function renderAmazonAccountsTable(){
   const b=document.getElementById('amzAcctBody'); if(!b) return;
-  if(!AMZ_ACCOUNTS.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">No Amazon accounts yet. Create one above.</p>`; return; }
-  b.innerHTML = AMZ_ACCOUNTS.map(a=>{
+  // Respect the top-bar Client filter: show only the selected client's account.
+  let list = AMZ_ACCOUNTS;
+  if(clientFilterActive()){ const c=clientFilterUser(); list = AMZ_ACCOUNTS.filter(a=>c && a.name===c.name); }
+  if(!list.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">${clientFilterActive()?'No Amazon account registered for this client yet.':'No Amazon accounts yet. Create one above.'}</p>`; return; }
+  b.innerHTML = list.map(a=>{
     const creds = a.credentials_set ? '<span class="pill ok">Credentials set</span>' : '<span class="pill ret">No credentials</span>';
     const active = a.active ? '<span class="pill ok">Active</span>' : '<span class="pill over">Inactive</span>';
     const brands = (a.brands&&a.brands.length) ? a.brands.map(esc).join(', ') : '<span style="color:var(--ink-soft)">none mapped</span>';
@@ -3286,6 +3380,7 @@ function renderAmazonAccountsTable(){
           <label class="btn btn-ghost" style="cursor:pointer;margin:0">Upload SKU map (CSV)
             <input type="file" accept=".csv" style="display:none" data-onchange="amzUploadSku('${esc(a.id)}',this)"></label>
           <button class="btn btn-teal" data-onclick="amzSyncNow('${esc(a.id)}')">Sync now</button>
+          <button class="btn btn-ghost btn-del" data-onclick="amzDeleteAccount('${esc(a.id)}')">Delete account</button>
         </div>
         <div id="amzcreds_${esc(a.id)}" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
           <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Pasted here, encrypted on save. Never shown again.</div>
@@ -3304,7 +3399,7 @@ function renderAmazonAccountsTable(){
 // ---- actions ----
 function amzShowErr(m){ const e=document.getElementById('amz_err'); if(e){ e.textContent=m; e.style.display='block'; } else toast(m); }
 // Clients (profiles) available to register — only real clients, not admins.
-function amzClientList(){ return (USERS||[]).filter(u=>u.role==='brand'); }
+function amzClientList(){ return clientsOnly(); }
 // A client's assigned brands (from their profile / user_brands).
 function amzClientBrands(clientId){ const c=amzClientList().find(u=>String(u.id)===String(clientId)); return c?(c.brands||[]).slice():[]; }
 // Build <option> list for the client picker.
@@ -3361,9 +3456,73 @@ function amzSyncBrandsFromClient(accountId){
     .then(res=>{ const skipped=(res&&res.skipped)||[]; toast('Brands synced from client'+(skipped.length?` · ${skipped.length} skipped (on another account)`:'')); amzRefresh(); })
     .catch(err=>toast((err&&err.message)||'Could not sync brands'));
 }
+// Delete a registered Amazon account. Frees its brands & warehouses and
+// removes its SKU map; order/transaction history and sync-log history are kept.
+function amzDeleteAccount(accountId){
+  const a=(AMZ_ACCOUNTS||[]).find(x=>String(x.id)===String(accountId)); if(!a) return;
+  const msg = `Delete the Amazon account "${a.name}"?\n\nThis will:\n• unlink its brands (they become free to assign to another account)\n• unlink its warehouses\n• remove its Amazon SKU mappings\n\nIt will NOT delete any orders, inventory, or transaction history. Sync history is kept but unlinked. This cannot be undone.`;
+  confirmAction(msg, ()=>{
+    if(!(window.LIVE && typeof liveDeleteAmazonAccount==='function')){ toast('Live connection needed'); return; }
+    liveDeleteAmazonAccount(accountId)
+      .then(()=>{ toast('Account deleted · '+a.name); amzRefresh(); })
+      .catch(err=>toast((err&&err.message)||'Could not delete account'));
+  });
+}
 function amzOpenCreds(accountId){
   const box=document.getElementById('amzcreds_'+accountId);
   if(box) box.style.display = (box.style.display==='none'?'block':'none');
+}
+
+/* ===== Stage 5C: Sub-user management ===== */
+function subAddOpen(clientId){
+  const c=clientsOnly().find(u=>String(u.id)===String(clientId)); if(!c){ toast('Client not found'); return; }
+  openModal('Add sub-user · '+c.name,
+    `<div class="fg-field"><label>Full name <span class="req">*</span></label><input id="sub_name" placeholder="e.g. Ayesha K."></div>
+     <div class="fg-field"><label>Login email <span class="req">*</span></label><input id="sub_email" type="email" placeholder="person@company.com"></div>
+     <div class="fg-field"><label>Temporary password <span class="req">*</span></label><input id="sub_pass" placeholder="set a temporary password"></div>
+     <div class="fg-field"><label>Role <span class="req">*</span></label>
+       <select id="sub_role">
+         <option value="manager">Manager — can log inward / outward / transfers and view everything</option>
+         <option value="viewer">Viewer — read-only (dashboard, inventory, reports, financials)</option>
+       </select>
+     </div>
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">This sub-user belongs to <b>${esc(c.name)}</b> and automatically sees that client’s brands (${esc((c.brands||[]).join(', ')||'none')}). They set a new password on first login.</p>`,
+    ()=>{
+      const name=(document.getElementById('sub_name').value||'').trim();
+      const email=(document.getElementById('sub_email').value||'').trim();
+      const pass=(document.getElementById('sub_pass').value||'').trim();
+      const role=(document.getElementById('sub_role').value||'manager');
+      if(!name||!email||!pass){ showFieldError('modalErr','Fill name, email and temporary password'); return; }
+      if(!isValidEmail(email)){ showFieldError('modalErr','Please enter a valid email address'); return; }
+      if(USERS.some(u=>String(u.email||'').toLowerCase()===email.toLowerCase())){ showFieldError('modalErr','That email already has an account'); return; }
+      if(!(window.LIVE && typeof liveCreateSubUser==='function')){ toast('Live connection needed'); return; }
+      const btn=document.getElementById('modalSave'); if(btn){ btn.disabled=true; btn.textContent='Creating…'; }
+      liveCreateSubUser(clientId, name, email, pass, role)
+        .then(()=>{ closeModal(); toast('Sub-user created · '+name); RENDER.users(); })
+        .catch(err=>{ showFieldError('modalErr',(err&&err.message)||'Could not create sub-user'); if(btn){ btn.disabled=false; btn.textContent='Save'; } });
+    }, 'Create sub-user');
+}
+function subToggle(id){
+  const s=(USERS||[]).find(u=>String(u.id)===String(id)); if(!s) return;
+  if(!(window.LIVE && typeof liveSetUserActive==='function')){ toast('Live connection needed'); return; }
+  liveSetUserActive(id, !s.active)
+    .then(()=>{ toast(!s.active?'Sub-user enabled':'Sub-user disabled'); RENDER.users(); })
+    .catch(err=>toast((err&&err.message)||'Could not update sub-user'));
+}
+function subResetPw(id){
+  const s=(USERS||[]).find(u=>String(u.id)===String(id)); if(!s) return;
+  openModal('Reset password · '+s.name,
+    `<div class="fg-field"><label>New temporary password <span class="req">*</span></label><input id="sub_newpw" placeholder="set a temporary password"></div>
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">${esc(s.name)} will sign in with this password and be required to set a new one. Nothing else about their account changes.</p>`,
+    ()=>{
+      const pw=(document.getElementById('sub_newpw').value||'').trim();
+      if(!pw){ showFieldError('modalErr','Enter a new temporary password'); return; }
+      if(!(window.LIVE && typeof liveResetPassword==='function')){ toast('Live connection needed'); return; }
+      const btn=document.getElementById('modalSave'); if(btn){ btn.disabled=true; btn.textContent='Resetting…'; }
+      liveResetPassword(id, pw)
+        .then(()=>{ closeModal(); toast('Password reset · '+s.name); RENDER.users(); })
+        .catch(err=>{ showFieldError('modalErr',(err&&err.message)||'Could not reset password'); if(btn){ btn.disabled=false; btn.textContent='Save'; } });
+    }, 'Reset password');
 }
 function amzSaveCreds(accountId){
   if(AMZ_BUSY){ return; }
@@ -4173,6 +4332,13 @@ async function liveSetAccountBrands(accountId, brandNames){
   }
   return { skipped };
 }
+// ADMIN: delete an Amazon account. FK cascades handle account_brands,
+// amazon_sku_map and client_warehouses; amazon_sync_log.account_id is set
+// NULL (history kept). No order/transaction rows are affected.
+async function liveDeleteAmazonAccount(accountId){
+  const { error } = await sb.from('amazon_accounts').delete().eq('id', accountId);
+  if(error) throw error;
+}
 // ADMIN: save credentials via the crypto-helper edge function (encrypts them).
 async function liveSaveAmazonCreds(accountId, clientId, clientSecret, refreshToken){
   const { data, error } = await sb.functions.invoke('crypto-helper', {
@@ -4265,7 +4431,25 @@ async function liveLoadAll(){
   recomputeStock();
 
   // users (admin only; RLS lets admin read all)
-  if (isAdmin()) { await liveLoadUsers(); }
+  if (isAdmin()) { await liveLoadUsers(); await liveLoadClientWarehouses(); }
+}
+// Build CLIENT_WH { clientProfileId : [warehouse names] } for the admin client filter.
+// Bridge: client profile --(name match)--> amazon_accounts --> client_warehouses --> warehouses.
+async function liveLoadClientWarehouses(){
+  CLIENT_WH = {};
+  if(!LIVE || !isAdmin()) return CLIENT_WH;
+  try{
+    const { data: accts } = await sb.from('amazon_accounts').select('id,name');
+    const { data: links } = await sb.from('client_warehouses').select('account_id, warehouses(name)');
+    const whByAcct = {};
+    (links||[]).forEach(l=>{ const n=l.warehouses?l.warehouses.name:null; if(!n) return; (whByAcct[l.account_id]=whByAcct[l.account_id]||[]).push(n); });
+    // account name -> warehouse names
+    const whByAcctName = {};
+    (accts||[]).forEach(a=>{ whByAcctName[a.name]=(whByAcct[a.id]||[]).slice(); });
+    // map onto client profiles by matching name
+    clientsOnly().forEach(u=>{ CLIENT_WH[u.id]=(whByAcctName[u.name]||[]).slice(); });
+  }catch(e){ /* keep empty on failure */ }
+  return CLIENT_WH;
 }
 // Load client/admin profiles into USERS (admin only). Split out so the
 // Amazon Accounts client-picker can refresh clients without a full reload.
@@ -4276,10 +4460,15 @@ async function liveLoadUsers(){
   (us||[]).forEach(u=>{
     USERS.push({ id:u.id, name:u.name, email:u.email, role:u.role==='admin'?'admin':'brand',
       brands:(u.user_brands||[]).map(x=>BRAND_NAME[x.brand_id]).filter(Boolean),
-      active:u.active, mustReset:u.must_reset_password, logo:u.logo_url||'' }); // FEATURE 7
+      active:u.active, mustReset:u.must_reset_password, logo:u.logo_url||'',
+      parentId:u.parent_id||null, subRole:u.sub_role||null }); // Stage 5: sub-user link
   });
   return USERS;
 }
+/* --- sub-user helpers (Stage 5) --- */
+function isSubUser(u){ return !!(u && u.parentId); }
+function clientsOnly(){ return (USERS||[]).filter(u=>u.role==='brand' && !isSubUser(u)); }
+function subUsersOf(clientId){ return (USERS||[]).filter(u=>isSubUser(u) && String(u.parentId)===String(clientId)); }
 
 /* ---------- LOGIN via Supabase ---------- */
 async function liveLogin(email, password){
@@ -4483,6 +4672,26 @@ async function liveCreateUser(u){
   await liveLoadAll();
 }
 async function liveSetUserActive(id, active){ await sb.from('profiles').update({ active }).eq('id', id); await liveLoadAll(); }
+// Stage 5: create a sub-user under a client (brands inherited server-side).
+async function liveCreateSubUser(parentId, name, email, tempPassword, subRole){
+  const { data, error } = await sb.functions.invoke('create-user', {
+    body: { name, email, tempPassword, parentId, subRole }
+  });
+  if (error) throw new Error(error.message||'Could not create sub-user');
+  if (data && data.error) throw new Error(data.error);
+  await liveLoadAll();
+  return data;
+}
+// Stage 5: admin resets any login's password (new temp pw + forced reset).
+async function liveResetPassword(targetId, newPassword){
+  const { data, error } = await sb.functions.invoke('create-user', {
+    body: { action:'resetPassword', targetId, newPassword }
+  });
+  if (error) throw new Error(error.message||'Could not reset password');
+  if (data && data.error) throw new Error(data.error);
+  await liveLoadAll();
+  return data;
+}
 
 /* ---------- EDITS (Feature 1) ---------- */
 async function liveUpdateBrand(oldName, newName){
