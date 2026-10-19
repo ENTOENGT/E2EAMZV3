@@ -2912,7 +2912,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
-    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzSaveBrands','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
+    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzClientPicked','amzSyncBrandsFromClient','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
     'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
@@ -3222,12 +3222,18 @@ RENDER.amazonaccounts=function(){
   setHead('Amazon Accounts','Each client’s Amazon Seller Central connection');
   C.innerHTML=`
     <div class="card" style="margin-bottom:16px">
-      <div class="card-head"><div><h3>Register a new Amazon account</h3><div class="ch-sub">Add a client’s Seller Central, then map brands & load their SKU map below</div></div></div>
+      <div class="card-head"><div><h3>Register a new Amazon account</h3><div class="ch-sub">Pick an existing client — brands are taken from that client automatically</div></div></div>
       <div id="amz_err" class="field-error" style="display:none"></div>
       <div class="form-grid">
-        <div class="fg-field"><label>Account name <span class="req">*</span></label><input id="amz_name" placeholder="e.g. Client C"></div>
+        <div class="fg-field"><label>Client <span class="req">*</span></label>
+          <select id="amz_client" data-searchable data-ph="Search client…" data-onchange="amzClientPicked(this.value)">
+            <option value="">Select a client…</option>
+            ${amzClientOptions()}
+          </select>
+        </div>
         <div class="fg-field"><label>Marketplace ID</label><input id="amz_mkt" value="A2VIGQ35RCS4UG" placeholder="UAE = A2VIGQ35RCS4UG"></div>
       </div>
+      <div id="amz_brand_preview" style="display:none;margin:4px 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:12.5px"></div>
       <button class="btn btn-teal" data-onclick="amzAddAccount()">Create account</button>
     </div>
     <div class="card">
@@ -3239,7 +3245,14 @@ RENDER.amazonaccounts=function(){
 };
 function amzRefresh(){
   if(window.LIVE && typeof liveLoadAmazonAccounts==='function'){
-    liveLoadAmazonAccounts().then(renderAmazonAccountsTable).catch(e=>{
+    // refresh clients first (so the picker reflects the latest brand assignments), then accounts.
+    const usersP = (typeof liveLoadUsers==='function') ? liveLoadUsers().catch(()=>{}) : Promise.resolve();
+    usersP.then(()=>liveLoadAmazonAccounts()).then(()=>{
+      // keep the create-form picker in sync with current clients
+      const sel=document.getElementById('amz_client');
+      if(sel){ const cur=sel.value; sel.innerHTML=`<option value="">Select a client…</option>`+amzClientOptions(); sel.value=cur; }
+      renderAmazonAccountsTable();
+    }).catch(e=>{
       const b=document.getElementById('amzAcctBody');
       if(b) b.innerHTML=`<p style="color:var(--bad);font-size:13px">Could not load accounts: ${esc((e&&e.message)||String(e))}</p>`;
     });
@@ -3254,11 +3267,6 @@ function renderAmazonAccountsTable(){
     const brands = (a.brands&&a.brands.length) ? a.brands.map(esc).join(', ') : '<span style="color:var(--ink-soft)">none mapped</span>';
     const ls = a.lastSync;
     const lastTxt = ls ? `${esc(fmtUpdated? fmtUpdated(ls.ran_at): ls.ran_at)} · ${esc(ls.status)}${(ls.orders!=null)?` · ${ls.orders} orders, ${ls.returns} ret`:''}` : '<span style="color:var(--ink-soft)">never synced</span>';
-    // brand checkboxes for mapping (a brand belongs to one account; show current selection)
-    const brandChecks = BRANDS.map(bn=>{
-      const on = (a.brands||[]).indexOf(bn)>=0;
-      return `<label class="bulk-selall" style="margin-right:12px"><input type="checkbox" class="bulk-chk" data-amz-brand="${esc(a.id)}" value="${esc(bn)}" ${on?'checked':''}>${esc(bn)}</label>`;
-    }).join('');
     return `<div class="boe-card" style="margin-bottom:14px">
       <div class="boe-head" style="cursor:default">
         <div><div class="boe-label">ACCOUNT</div><div class="boe-no">${esc(a.name)}</div></div>
@@ -3270,10 +3278,10 @@ function renderAmazonAccountsTable(){
         </div>
       </div>
       <div class="po-block">
-        <div style="margin-bottom:10px"><b style="font-size:13px">Brands</b> &nbsp; <span style="font-size:12.5px;color:var(--ink-soft)">${brands}</span></div>
-        <div style="margin-bottom:10px">${brandChecks||'<span style="color:var(--ink-soft);font-size:12px">No brands exist yet</span>'}</div>
+        <div style="margin-bottom:10px"><b style="font-size:13px">Brands</b> &nbsp; <span style="font-size:12.5px;color:var(--ink-soft)">${brands}</span>
+          <span style="font-size:11.5px;color:var(--ink-soft);display:block;margin-top:2px">Brands come from this client’s assignment (Clients → Edit).</span></div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-          <button class="btn btn-ghost" data-onclick="amzSaveBrands('${esc(a.id)}')">Save brands</button>
+          <button class="btn btn-ghost" data-onclick="amzSyncBrandsFromClient('${esc(a.id)}')">Sync brands from client</button>
           <button class="btn btn-ghost" data-onclick="amzOpenCreds('${esc(a.id)}')">Save / update credentials</button>
           <label class="btn btn-ghost" style="cursor:pointer;margin:0">Upload SKU map (CSV)
             <input type="file" accept=".csv" style="display:none" data-onchange="amzUploadSku('${esc(a.id)}',this)"></label>
@@ -3295,23 +3303,63 @@ function renderAmazonAccountsTable(){
 }
 // ---- actions ----
 function amzShowErr(m){ const e=document.getElementById('amz_err'); if(e){ e.textContent=m; e.style.display='block'; } else toast(m); }
+// Clients (profiles) available to register — only real clients, not admins.
+function amzClientList(){ return (USERS||[]).filter(u=>u.role==='brand'); }
+// A client's assigned brands (from their profile / user_brands).
+function amzClientBrands(clientId){ const c=amzClientList().find(u=>String(u.id)===String(clientId)); return c?(c.brands||[]).slice():[]; }
+// Build <option> list for the client picker.
+function amzClientOptions(){
+  return amzClientList().map(u=>{
+    const taken = (AMZ_ACCOUNTS||[]).some(a=>a.name===u.name);
+    return `<option value="${esc(u.id)}"${taken?' disabled':''}>${esc(u.name)}${taken?' — already registered':''}</option>`;
+  }).join('');
+}
+// When a client is picked, preview the brands that will be inherited (read-only).
+function amzClientPicked(clientId){
+  const box=document.getElementById('amz_brand_preview'); if(!box) return;
+  if(!clientId){ box.style.display='none'; box.innerHTML=''; return; }
+  const brands=amzClientBrands(clientId);
+  box.style.display='block';
+  box.innerHTML = brands.length
+    ? `<b>Brands for this client:</b> ${brands.map(esc).join(', ')}<div style="color:var(--ink-soft);margin-top:4px">These brands are linked to the account automatically. Only these are synced.</div>`
+    : `<span style="color:var(--bad)">This client has no brands assigned yet.</span> Assign brands to the client first (Clients → Edit), then register the account.`;
+}
 function amzAddAccount(){
-  const name=(document.getElementById('amz_name').value||'').trim();
+  const clientId=(document.getElementById('amz_client')||{}).value||'';
   const mkt=(document.getElementById('amz_mkt').value||'A2VIGQ35RCS4UG').trim();
-  if(!name){ amzShowErr('Enter an account name'); return; }
+  if(!clientId){ amzShowErr('Select a client'); return; }
+  const client=amzClientList().find(u=>String(u.id)===String(clientId));
+  if(!client){ amzShowErr('Client not found'); return; }
+  const brands=amzClientBrands(clientId);
+  if(!brands.length){ amzShowErr('This client has no brands assigned. Assign brands to the client first, then register.'); return; }
+  if((AMZ_ACCOUNTS||[]).some(a=>a.name===client.name)){ amzShowErr('This client already has an Amazon account registered'); return; }
   const e=document.getElementById('amz_err'); if(e) e.style.display='none';
   if(!(window.LIVE && typeof liveAddAmazonAccount==='function')){ toast('Live connection needed'); return; }
-  liveAddAmazonAccount(name, mkt)
-    .then(()=>{ toast('Account created · '+name); document.getElementById('amz_name').value=''; amzRefresh(); })
+  // Create the account under the client's name, then auto-map exactly the client's brands.
+  liveAddAmazonAccount(client.name, mkt)
+    .then(()=>liveLoadAmazonAccounts())
+    .then(()=>{
+      const created=(AMZ_ACCOUNTS||[]).find(a=>a.name===client.name);
+      if(!created) throw new Error('Account created but could not be re-read');
+      return liveSetAccountBrands(created.id, brands).then(res=>{
+        const skipped=(res&&res.skipped)||[];
+        toast('Account created · '+client.name+' · '+(brands.length-skipped.length)+' brand(s) linked'+(skipped.length?` (${skipped.length} already on another account)`:''));
+      });
+    })
+    .then(()=>{ const sel=document.getElementById('amz_client'); if(sel) sel.value=''; amzClientPicked(''); amzRefresh(); })
     .catch(err=>amzShowErr((err&&err.message)||'Could not create account'));
 }
-function amzSaveBrands(accountId){
-  const boxes=document.querySelectorAll('input[data-amz-brand="'+accountId+'"]');
-  const chosen=[...boxes].filter(b=>b.checked).map(b=>b.value);
+// Re-pull an existing account's brands from its client (used by the per-account card).
+function amzSyncBrandsFromClient(accountId){
+  const acct=(AMZ_ACCOUNTS||[]).find(a=>String(a.id)===String(accountId));
+  const client=acct?amzClientList().find(u=>u.name===acct.name):null;
+  if(!client){ toast('No matching client for this account'); return; }
+  const brands=amzClientBrands(client.id);
+  if(!brands.length){ toast('That client has no brands assigned'); return; }
   if(!(window.LIVE && typeof liveSetAccountBrands==='function')){ toast('Live connection needed'); return; }
-  liveSetAccountBrands(accountId, chosen)
-    .then(()=>{ toast('Brands updated'); amzRefresh(); })
-    .catch(err=>toast((err&&err.message)||'Could not update brands'));
+  liveSetAccountBrands(accountId, brands)
+    .then(res=>{ const skipped=(res&&res.skipped)||[]; toast('Brands synced from client'+(skipped.length?` · ${skipped.length} skipped (on another account)`:'')); amzRefresh(); })
+    .catch(err=>toast((err&&err.message)||'Could not sync brands'));
 }
 function amzOpenCreds(accountId){
   const box=document.getElementById('amzcreds_'+accountId);
@@ -4102,15 +4150,28 @@ async function liveAddAmazonAccount(name, marketplaceId){
   if(error) throw error;
 }
 // ADMIN: set an account's brands (replace the set). A brand belongs to one account.
+// Brands already linked to a DIFFERENT account are skipped (not stolen) and
+// reported back in {skipped:[names]}, so one client can't grab another's brand.
 async function liveSetAccountBrands(accountId, brandNames){
-  const ids = (brandNames||[]).map(n=>BRAND_ID[n]).filter(Boolean);
-  // remove existing links for this account, then insert the chosen ones.
+  const wantIds = (brandNames||[]).map(n=>({ name:n, id:BRAND_ID[n] })).filter(x=>x.id);
+  // Which of these brands are already owned by another account?
+  const idList = wantIds.map(x=>x.id);
+  let skipped = [];
+  if(idList.length){
+    const { data: existing } = await sb.from('account_brands')
+      .select('brand_id, account_id').in('brand_id', idList);
+    const ownedElsewhere = new Set((existing||[]).filter(r=>r.account_id!==accountId).map(r=>r.brand_id));
+    skipped = wantIds.filter(x=>ownedElsewhere.has(x.id)).map(x=>x.name);
+  }
+  const insertIds = wantIds.filter(x=>!skipped.includes(x.name)).map(x=>x.id);
+  // Replace this account's links with the allowed set.
   await sb.from('account_brands').delete().eq('account_id', accountId);
-  if(ids.length){
-    const rows = ids.map(bid=>({ account_id:accountId, brand_id:bid }));
+  if(insertIds.length){
+    const rows = insertIds.map(bid=>({ account_id:accountId, brand_id:bid }));
     const { error } = await sb.from('account_brands').insert(rows);
     if(error) throw error;
   }
+  return { skipped };
 }
 // ADMIN: save credentials via the crypto-helper edge function (encrypts them).
 async function liveSaveAmazonCreds(accountId, clientId, clientSecret, refreshToken){
@@ -4204,15 +4265,20 @@ async function liveLoadAll(){
   recomputeStock();
 
   // users (admin only; RLS lets admin read all)
-  if (isAdmin()) {
-    const { data: us } = await sb.from('profiles').select('*, user_brands(brand_id)').order('created_at');
-    USERS.length=0;
-    (us||[]).forEach(u=>{
-      USERS.push({ id:u.id, name:u.name, email:u.email, role:u.role==='admin'?'admin':'brand',
-        brands:(u.user_brands||[]).map(x=>BRAND_NAME[x.brand_id]).filter(Boolean),
-        active:u.active, mustReset:u.must_reset_password, logo:u.logo_url||'' }); // FEATURE 7
-    });
-  }
+  if (isAdmin()) { await liveLoadUsers(); }
+}
+// Load client/admin profiles into USERS (admin only). Split out so the
+// Amazon Accounts client-picker can refresh clients without a full reload.
+async function liveLoadUsers(){
+  if(!LIVE || !isAdmin()) return USERS;
+  const { data: us } = await sb.from('profiles').select('*, user_brands(brand_id)').order('created_at');
+  USERS.length=0;
+  (us||[]).forEach(u=>{
+    USERS.push({ id:u.id, name:u.name, email:u.email, role:u.role==='admin'?'admin':'brand',
+      brands:(u.user_brands||[]).map(x=>BRAND_NAME[x.brand_id]).filter(Boolean),
+      active:u.active, mustReset:u.must_reset_password, logo:u.logo_url||'' }); // FEATURE 7
+  });
+  return USERS;
 }
 
 /* ---------- LOGIN via Supabase ---------- */
