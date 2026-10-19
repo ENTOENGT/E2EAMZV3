@@ -952,6 +952,7 @@ const NAV = [
     {id:'warehouses', label:'Warehouses', icon:'building', adminOnly:true},
     {id:'channels', label:'Sales Channels', icon:'tag', adminOnly:true},
     {id:'users', label:'Users', icon:'users', adminOnly:true},
+    {id:'amazonaccounts', label:'Amazon Accounts', icon:'repeat', adminOnly:true},
   ]},
 ];
 const ICONS = {
@@ -981,7 +982,7 @@ function buildNav(){
   }).join('');
 }
 function go(page){
-  const adminPages=['brands','products','warehouses','users','channels'];
+  const adminPages=['brands','products','warehouses','users','channels','amazonaccounts'];
   if(adminPages.includes(page) && !isAdmin()) page='dashboard';
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===page));
   (RENDER[page]||RENDER.dashboard)();
@@ -2911,6 +2912,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
+    'renderAmazonAccountsTable', // Amazon Accounts admin (B1)
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
     'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
@@ -3208,6 +3210,52 @@ function editUser(id){
 /* ============================================================
    FEATURE 5 — SALES CHANNELS management page
 ============================================================ */
+/* ============================================================
+   ADMIN — AMAZON ACCOUNTS (multi-client integration)
+   B1: read-only view — lists each Amazon account, its brands,
+   credential status, and last sync. Actions added in B2.
+============================================================ */
+let AMZ_ACCOUNTS = [];   // [{id,name,marketplace_id,active,credentials_set,brands:[...],lastSync:{...}}]
+RENDER.amazonaccounts=function(){
+  if(!isAdmin()){ go('dashboard'); return; }
+  setHead('Amazon Accounts','Each client’s Amazon Seller Central connection');
+  C.innerHTML=`
+    <div class="card">
+      <div class="card-head"><div><h3>Connected Amazon accounts</h3><div class="ch-sub">One account per client · brands, credentials & last sync</div></div></div>
+      <div id="amzAcctBody"><p style="color:var(--ink-soft);font-size:13px;padding:8px 0">Loading accounts…</p></div>
+    </div>`;
+  if(window.LIVE && typeof liveLoadAmazonAccounts==='function'){
+    liveLoadAmazonAccounts().then(renderAmazonAccountsTable).catch(e=>{
+      const b=document.getElementById('amzAcctBody');
+      if(b) b.innerHTML=`<p style="color:var(--bad);font-size:13px">Could not load accounts: ${esc((e&&e.message)||String(e))}</p>`;
+    });
+  } else {
+    renderAmazonAccountsTable();
+  }
+};
+function renderAmazonAccountsTable(){
+  const b=document.getElementById('amzAcctBody'); if(!b) return;
+  if(!AMZ_ACCOUNTS.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">No Amazon accounts yet.</p>`; return; }
+  b.innerHTML=`<div class="table-scroll"><table>
+    <thead><tr><th>Account</th><th>Marketplace</th><th>Brands</th><th>Credentials</th><th>Status</th><th>Last sync</th></tr></thead>
+    <tbody>${AMZ_ACCOUNTS.map(a=>{
+      const creds = a.credentials_set ? '<span class="pill ok">Set</span>' : '<span class="pill ret">Not set</span>';
+      const active = a.active ? '<span class="pill ok">Active</span>' : '<span class="pill over">Inactive</span>';
+      const brands = (a.brands&&a.brands.length) ? a.brands.map(esc).join(', ') : '<span style="color:var(--ink-soft)">—</span>';
+      const ls = a.lastSync;
+      const lastTxt = ls ? `${esc(fmtUpdated? fmtUpdated(ls.ran_at): ls.ran_at)} · ${esc(ls.status)}${(ls.orders!=null)?` · ${ls.orders} orders, ${ls.returns} ret`:''}` : '<span style="color:var(--ink-soft)">never</span>';
+      return `<tr>
+        <td class="sku-cell">${esc(a.name)}</td>
+        <td class="mono">${esc(a.marketplace_id||'')}</td>
+        <td>${brands}</td>
+        <td>${creds}</td>
+        <td>${active}</td>
+        <td style="font-size:12.5px">${lastTxt}</td>
+      </tr>`;}).join('')}</tbody>
+  </table></div>
+  <p style="color:var(--ink-soft);font-size:12px;margin-top:10px">Credentials are stored encrypted. This screen never shows them. Registering accounts and running syncs from here is coming next.</p>`;
+}
+
 RENDER.channels=function(){
   if(!isAdmin()){ go('dashboard'); return; }
   setHead('Sales Channels','Add, edit and remove sales channels');
@@ -3920,6 +3968,30 @@ function resolveProdId(sku){
 let PROD_ID = {};    // sku -> id
 let INWARD_ID = {};  // our display id -> db id
 let OUTWARD_ID = {}; // our display id -> db id
+
+// ADMIN: load Amazon accounts + their brands + last sync (read-only). Never loads credentials.
+async function liveLoadAmazonAccounts(){
+  if(!LIVE) return AMZ_ACCOUNTS;
+  const { data: accts, error } = await sb.from('amazon_accounts')
+    .select('id,name,marketplace_id,active,credentials_set').order('name');
+  if(error) throw error;
+  // brand links (+ brand names)
+  const { data: links } = await sb.from('account_brands').select('account_id, brands(name)');
+  const byAcct = {};
+  (links||[]).forEach(l=>{ const n=l.brands?l.brands.name:null; if(!n) return; (byAcct[l.account_id]=byAcct[l.account_id]||[]).push(n); });
+  // latest sync per account
+  const { data: logs } = await sb.from('amazon_sync_log')
+    .select('account_id,status,orders,returns,ran_at').order('ran_at',{ascending:false}).limit(200);
+  const lastByAcct = {};
+  (logs||[]).forEach(r=>{ if(r.account_id && !lastByAcct[r.account_id]) lastByAcct[r.account_id]=r; });
+  AMZ_ACCOUNTS = (accts||[]).map(a=>({
+    id:a.id, name:a.name, marketplace_id:a.marketplace_id, active:a.active,
+    credentials_set:a.credentials_set,
+    brands:(byAcct[a.id]||[]).sort(),
+    lastSync:lastByAcct[a.id]||null
+  }));
+  return AMZ_ACCOUNTS;
+}
 
 async function liveLoadAll(){
   if(!LIVE) return;
