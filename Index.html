@@ -3484,20 +3484,20 @@ function clientWhOpen(clientId){
     const owner=ownerOf[w];
     const takenByOther = owner && String(owner)!==String(clientId);
     const ownerName = takenByOther ? ((USERS.find(u=>String(u.id)===String(owner))||{}).name||'another client') : '';
-    return `<label class="brand-check" style="${takenByOther?'opacity:.55':''}">
-      <input type="checkbox" class="cwh_cb" value="${esc(w)}" ${mine.has(w)?'checked':''} ${takenByOther?'disabled':''}>
-      ${esc(w)}${takenByOther?` <span style="font-size:11px;color:var(--ink-soft)">· ${esc(ownerName)}</span>`:''}</label>`;
+    return `<label class="brand-check">
+      <input type="checkbox" class="cwh_cb" value="${esc(w)}" ${mine.has(w)?'checked':''}>
+      ${esc(w)}${takenByOther?` <span style="font-size:11px;color:var(--bad)">· now ${esc(ownerName)}</span>`:''}</label>`;
   }).join('') || '<span style="color:var(--ink-soft);font-size:12.5px">No warehouses exist yet. Create warehouses first.</span>';
   openModal('Warehouses · '+c.name,
     `<div class="fg-field"><label>Assign warehouses to this client — tick one or more</label>
       <div class="brand-check-grid">${rows}</div></div>
-     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">A warehouse belongs to one client only. Greyed-out warehouses are already owned by another client. This client (and its sub-users) will see data only for the ticked warehouses.</p>`,
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">A warehouse belongs to one client only. A warehouse marked in red (“now &lt;name&gt;”) currently belongs to another client — ticking it here <b>moves</b> it to this client. This client (and its sub-users) see data only for the ticked warehouses.</p>`,
     ()=>{
-      const chosen=[...document.querySelectorAll('.cwh_cb')].filter(x=>x.checked&&!x.disabled).map(x=>x.value);
+      const chosen=[...document.querySelectorAll('.cwh_cb')].filter(x=>x.checked).map(x=>x.value);
       if(!(window.LIVE && typeof liveSetClientWarehouses==='function')){ toast('Live connection needed'); return; }
       const btn=document.getElementById('modalSave'); if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
       liveSetClientWarehouses(clientId, chosen)
-        .then(res=>{ const sk=(res&&res.skipped)||[]; closeModal(); toast('Warehouses updated · '+c.name+(sk.length?` (${sk.length} skipped)`:'')); buildWhFilter(); RENDER.users(); })
+        .then(res=>{ const mv=(res&&res.moved)||0; closeModal(); toast('Warehouses updated · '+c.name+(mv?` (${mv} moved from another client)`:'')); buildWhFilter(); RENDER.users(); })
         .catch(err=>{ showFieldError('modalErr',(err&&err.message)||'Could not update warehouses'); if(btn){ btn.disabled=false; btn.textContent='Save'; } });
     }, 'Save warehouses', 'modal-wide');
 }
@@ -4479,28 +4479,29 @@ async function liveLoadClientWarehouses(){
   }catch(e){ /* keep empty on failure */ }
   return CLIENT_WH;
 }
-// Replace a client's warehouse set. A warehouse belongs to one client only;
-// warehouses owned by a DIFFERENT client are skipped and reported in {skipped}.
+// Replace a client's warehouse set. A warehouse belongs to one client only.
+// A chosen warehouse currently owned by ANOTHER client is MOVED to this client
+// (its old link is removed first). Returns {moved} = how many came from another client.
 async function liveSetClientWarehouses(profileId, warehouseNames){
-  const wantIds = (warehouseNames||[]).map(n=>({name:n, id:WH_ID[n]})).filter(x=>x.id);
-  const idList = wantIds.map(x=>x.id);
-  let skipped=[];
-  if(idList.length){
+  const wantIds = (warehouseNames||[]).map(n=>WH_ID[n]).filter(Boolean);
+  let moved=0;
+  if(wantIds.length){
+    // count how many of the chosen are currently owned by a different client
     const { data: existing } = await sb.from('client_warehouses')
-      .select('warehouse_id, profile_id').in('warehouse_id', idList);
-    const ownedElse = new Set((existing||[]).filter(r=>String(r.profile_id)!==String(profileId)).map(r=>r.warehouse_id));
-    skipped = wantIds.filter(x=>ownedElse.has(x.id)).map(x=>x.name);
+      .select('warehouse_id, profile_id').in('warehouse_id', wantIds);
+    moved = (existing||[]).filter(r=>String(r.profile_id)!==String(profileId)).length;
+    // free the chosen warehouses from whoever holds them (incl. a null-profile seed row)
+    await sb.from('client_warehouses').delete().in('warehouse_id', wantIds);
   }
-  const insertIds = wantIds.filter(x=>!skipped.includes(x.name)).map(x=>x.id);
-  // clear this client's current links, then insert the chosen ones.
+  // clear this client's current links (any not re-chosen are released)
   await sb.from('client_warehouses').delete().eq('profile_id', profileId);
-  if(insertIds.length){
-    const rows = insertIds.map(wid=>({ profile_id:profileId, warehouse_id:wid }));
+  if(wantIds.length){
+    const rows = wantIds.map(wid=>({ profile_id:profileId, warehouse_id:wid }));
     const { error } = await sb.from('client_warehouses').insert(rows);
     if(error) throw error;
   }
   await liveLoadClientWarehouses();
-  return { skipped };
+  return { moved };
 }
 // Load client/admin profiles into USERS (admin only). Split out so the
 // Amazon Accounts client-picker can refresh clients without a full reload.
