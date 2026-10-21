@@ -560,7 +560,8 @@ let CURRENT = null;               // logged-in user
 let ROLE = 'admin';
 let WH_FILTER = 'all';            // top-right warehouse filter
 let CLIENT_FILTER = 'all';        // top-right client filter (admin only). 'all' = every client.
-let CLIENT_WH = {};               // { clientProfileId : [warehouse names] }  (from client_warehouses)
+let CLIENT_WH = {};               // { clientProfileId : [warehouse names] }  (from client_warehouses) — admin only
+let MY_WH = null;                 // warehouse names for a logged-in CLIENT/sub-user's own client (null = not loaded / admin)
 let AMAZON_COMMISSION = 0.30;
 /* Per-order commission: use the AED amount recorded with the order (from the sales
    template's Commission column). Manual entries without an amount fall back to 0. */
@@ -658,8 +659,19 @@ function clientFilterWarehouses(){ return clientFilterActive() ? (CLIENT_WH[CLIE
 function brandInClientFilter(brand){ return !clientFilterActive() || clientFilterBrands().includes(brand); }
 function whInClientFilter(wh){ return !clientFilterActive() || clientFilterWarehouses().includes(wh); }
 
-/* --- warehouse filter awareness (warehouse dropdown + client filter) --- */
-function whMatch(wh){ return (WH_FILTER==='all' || wh===WH_FILTER) && whInClientFilter(wh); }
+/* --- the set of warehouses the current user may see / pick ---
+   admin: all warehouses (narrowed by the top-bar client filter when active).
+   client / sub-user: only their own client's warehouses (MY_WH), loaded at login.
+   A non-admin with no warehouses assigned yet sees none. */
+function visibleWarehouses(){
+  if(isAdmin()) return clientFilterActive() ? WAREHOUSES.filter(w=>whInClientFilter(w)) : WAREHOUSES.slice();
+  return Array.isArray(MY_WH) ? MY_WH.slice() : [];
+}
+/* a non-admin may only touch warehouses in their own set */
+function whInMyScope(wh){ return isAdmin() ? true : (Array.isArray(MY_WH) ? MY_WH.includes(wh) : false); }
+
+/* --- warehouse filter awareness (warehouse dropdown + client filter + own scope) --- */
+function whMatch(wh){ return (WH_FILTER==='all' || wh===WH_FILTER) && whInClientFilter(wh) && whInMyScope(wh); }
 
 /* --- scoped + filtered views --- */
 function scopeProducts(){
@@ -945,7 +957,7 @@ function logout(){
 function buildWhFilter(){
   const sel=document.getElementById('whFilter');
   // When a client is selected, the warehouse dropdown lists ONLY that client's warehouses.
-  const list = clientFilterActive() ? clientFilterWarehouses() : WAREHOUSES;
+  const list = visibleWarehouses();
   sel.innerHTML = `<option value="all">All Warehouses</option>` + list.map(w=>`<option value="${esc(w)}">${esc(w)}</option>`).join('');
   // keep current selection if still valid, else reset to all
   if(WH_FILTER!=='all' && !list.includes(WH_FILTER)) WH_FILTER='all';
@@ -1005,6 +1017,7 @@ const NAV = [
     {id:'channels', label:'Sales Channels', icon:'tag', adminOnly:true},
     {id:'users', label:'Clients', icon:'users', adminOnly:true},
     {id:'amazonaccounts', label:'Amazon Accounts', icon:'repeat', adminOnly:true},
+    {id:'noonaccounts', label:'Noon Accounts', icon:'repeat', adminOnly:true},
   ]},
 ];
 const ICONS = {
@@ -1034,7 +1047,7 @@ function buildNav(){
   }).join('');
 }
 function go(page){
-  const adminPages=['brands','products','warehouses','users','channels','amazonaccounts'];
+  const adminPages=['brands','products','warehouses','users','channels','amazonaccounts','noonaccounts'];
   if(adminPages.includes(page) && !isAdmin()) page='dashboard';
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===page));
   (RENDER[page]||RENDER.dashboard)();
@@ -1343,7 +1356,7 @@ let INWARD_LINES = [];
 let _inLineSeq = 0;
 function addInwardLine(){
   const lid = 'L'+(++_inLineSeq);
-  INWARD_LINES.push({ lid, sku:(scopeProducts()[0]||{}).sku||'', qty:'', value:'', wh:WAREHOUSES[0]||'' });
+  INWARD_LINES.push({ lid, sku:(scopeProducts()[0]||{}).sku||'', qty:'', value:'', wh:(visibleWarehouses()[0]||'') });
   renderInwardLines();
 }
 function removeInwardLine(lid){
@@ -1366,7 +1379,7 @@ function renderInwardLines(){
     <td><select data-onchange="syncInwardLine('${l.lid}','sku',this.value)">${opts.replace(`value="${esc(l.sku)}"`,`value="${esc(l.sku)}" selected`)}</select></td>
     <td class="num"><input type="number" min="1" value="${esc(String(l.qty))}" placeholder="0" data-oninput="syncInwardLine('${l.lid}','qty',this.value)"></td>
     <td class="num"><input type="number" value="${esc(String(l.value))}" placeholder="auto" data-oninput="syncInwardLine('${l.lid}','value',this.value)"></td>
-    <td><select data-onchange="syncInwardLine('${l.lid}','wh',this.value)">${WAREHOUSES.map(w=>`<option${w===l.wh?' selected':''}>${esc(w)}</option>`).join('')}</select></td>
+    <td><select data-onchange="syncInwardLine('${l.lid}','wh',this.value)">${visibleWarehouses().map(w=>`<option${w===l.wh?' selected':''}>${esc(w)}</option>`).join('')}</select></td>
     <td class="num"><button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="removeInwardLine('${l.lid}')" title="Remove line">✕</button></td>
   </tr>`).join('');
 }
@@ -1639,7 +1652,7 @@ function renderSalesTab(){
       <!-- ADDED (Issue 3): warehouse / channel / search + group toggle -->
       <div class="sales-filter-row">
         <input type="text" class="filter-input" placeholder="Search order, SKU, reference…" value="${esc(f.q||'')}" data-oninput="setSalesSearch(this.value)">
-        <select class="filter-input" data-onchange="setSalesWh(this.value)"><option value="">All warehouses</option>${WAREHOUSES.map(w=>`<option${f.wh===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
+        <select class="filter-input" data-onchange="setSalesWh(this.value)"><option value="">All warehouses</option>${visibleWarehouses().map(w=>`<option${f.wh===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
         <select class="filter-input" data-onchange="setSalesChannel(this.value)"><option value="">All channels</option>${CHANNELS.map(ch=>`<option${f.channel===ch?' selected':''}>${esc(ch)}</option>`).join('')}</select>
         <select class="filter-input" data-onchange="setSalesTxn(this.value)"><option value="">All types</option><option value="sale"${f.txn==='sale'?' selected':''}>Sales only</option><option value="return"${f.txn==='return'?' selected':''}>Returns only</option></select>
         <select class="filter-input" data-onchange="setSalesSrc(this.value)"><option value="">All sources</option><option value="manual"${f.src==='manual'?' selected':''}>Manual only</option><option value="amazon"${f.src==='amazon'?' selected':''}>Amazon (all)</option><option value="EasyShip"${f.src==='EasyShip'?' selected':''}>Amazon · Easy Ship</option><option value="FBA"${f.src==='FBA'?' selected':''}>Amazon · FBA</option></select>
@@ -1661,7 +1674,7 @@ function renderSalesTab(){
       <div class="fg-field"><label id="ou_qty_lbl">Quantity Sold</label><input id="ou_qty" type="number" min="1" placeholder="10"></div>
       <div class="fg-field"><label>Selling Price (AED)</label><input id="ou_price" type="number" step="0.01" placeholder="0"></div>
       <div class="fg-field"><label>Platform Commission (AED)</label><input id="ou_comm" type="number" step="0.01" placeholder="0"></div>
-      <div class="fg-field"><label>Warehouse</label><select id="ou_wh" data-searchable data-ph="Search warehouse…">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Warehouse</label><select id="ou_wh" data-searchable data-ph="Search warehouse…">${visibleWarehouses().map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field" style="justify-content:flex-end"><button class="btn btn-orange" id="ou_savebtn" data-onclick="saveOutward()">Log sale</button></div>
     </div>`:`<p style="color:var(--ink-soft);font-size:13px">Add a product and warehouse first.</p>`}
     <div class="upload-sep">Bulk upload sales (CSV)</div>
@@ -1776,7 +1789,7 @@ function groupOutwardByWarehouse(out){
         <div class="wh-meta"><span>${g.length} orders</span><span>${num2(units)} net units</span><span>comm ${inr(comm)}</span><b class="mono">${inr(val)}</b></div>
       </div>
       <div class="table-scroll"><table class="wh-table">
-        <thead><tr><th>Type</th><th>Order / Reference</th><th>Channel</th><th>SKU</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th>${isAdmin()?'<th></th>':''}</tr></thead>
+        <thead><tr><th>Type</th><th>Order / Reference</th><th>Channel</th><th>SKU</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th><th></th></tr></thead>
         <tbody>${g.map(o=>{const v=outRevenue(o), cm=outCommission(o); return `<tr class="${isReturn(o)?'row-return':''}">
           <td>${isReturn(o)?'<span class="pill ret">Sales Return</span>':'<span class="pill ok">Sale</span>'}</td>
           <td class="sku-cell">${esc(o.order)}${isReturn(o)&&o.origRef?`<small>↩ ${esc(o.origRef)}</small>`:''}</td>
@@ -1785,7 +1798,7 @@ function groupOutwardByWarehouse(out){
           <td class="num mono">${isReturn(o)?'−':''}${o.qty}</td><td class="num mono">${inr(o.price)}</td><td class="num mono ${isReturn(o)?'neg':''}">${inr(v)}</td>
           <td class="num mono">${inr(cm)}</td><td class="num mono ${v-cm<0?'neg':'pos'}">${inr(v-cm)}</td>
           <td class="mono">${esc(o.date)}</td>
-          ${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button></td>`:''}
+          <td class="num"><button class="btn btn-ghost" data-onclick="editOutward('${o.id}')">Edit</button>${isAdmin()?`<button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button>`:''}</td>
         </tr>`;}).join('')}</tbody>
       </table></div>
     </div>`;
@@ -1971,7 +1984,7 @@ function groupOutwardByReference(out){
         <div class="wh-meta"><span>${g.length} line${g.length>1?'s':''}</span><span>${num2(units)} net units</span><span>comm ${inr(comm)}</span><b class="mono">${inr(val)}</b></div>
       </div>
       <div class="table-scroll"><table class="wh-table">
-        <thead><tr>${admin?bulkSelectAllCell('out',ids):''}<th>Type</th><th>SKU</th><th>Product</th><th>Channel</th><th>Warehouse</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th>${admin?'<th></th>':''}</tr></thead>
+        <thead><tr>${admin?bulkSelectAllCell('out',ids):''}<th>Type</th><th>SKU</th><th>Product</th><th>Channel</th><th>Warehouse</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th><th></th></tr></thead>
         <tbody>${g.map(o=>{const v=outRevenue(o), cm=outCommission(o); return `<tr class="${isReturn(o)?'row-return':''}">
           ${admin?bulkCheckboxCell('out',o.id):''}
           <td>${isReturn(o)?('<span class="pill ret">Return</span>'+dispositionControl(o)):'<span class="pill ok">Sale</span>'}</td>
@@ -1982,7 +1995,7 @@ function groupOutwardByReference(out){
           <td class="num mono">${isReturn(o)?'−':''}${o.qty}</td><td class="num mono">${inr(o.price)}</td><td class="num mono ${isReturn(o)?'neg':''}">${inr(v)}</td>
           <td class="num mono">${inr(cm)}</td><td class="num mono ${v-cm<0?'neg':'pos'}">${inr(v-cm)}</td>
           <td class="mono">${esc(o.date)}</td>
-          ${admin?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button></td>`:''}
+          <td class="num"><button class="btn btn-ghost" data-onclick="editOutward('${o.id}')">Edit</button>${admin?`<button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button>`:''}</td>
         </tr>`;}).join('')}</tbody>
       </table></div>
     </div>`;
@@ -2025,6 +2038,56 @@ function deleteOutward(id){
   touchUpdated();          // ADDED (Issue 3)
   toast(`Deleted sale ${esc(o.order)}`);
   renderSalesTab();
+}
+/* ===== Issue 2: edit a single Outward line item ===== */
+function editOutward(id){
+  const o=OUTWARD.find(x=>x.id===id); if(!o){ toast('Line not found'); return; }
+  const isRet = o.type==='return';
+  // products this user may pick (scoped), and warehouses this user may pick
+  const prods = scopeProducts();
+  const whs = visibleWarehouses();
+  const prodOpts = prods.map(p=>`<option value="${esc(p.sku)}" ${p.sku===o.sku?'selected':''}>${esc(p.sku)} — ${esc(p.name)}</option>`).join('')
+    || `<option value="${esc(o.sku)}" selected>${esc(o.sku)}</option>`;
+  const whOpts = whs.map(w=>`<option ${w===o.wh?'selected':''}>${esc(w)}</option>`).join('')
+    || `<option selected>${esc(o.wh)}</option>`;
+  openModal((isRet?'Edit return · ':'Edit sale · ')+esc(o.order),
+    `<div class="fg-field"><label>SKU / product</label><select id="eo_sku" data-searchable data-ph="Search SKU…">${prodOpts}</select></div>
+     <div class="fg-field"><label>Warehouse</label><select id="eo_wh" data-searchable data-ph="Search warehouse…">${whOpts}</select></div>
+     <div class="form-grid">
+       <div class="fg-field"><label>${isRet?'Quantity returned':'Quantity sold'}</label><input id="eo_qty" type="number" min="1" value="${esc(o.qty)}"></div>
+       <div class="fg-field"><label>Unit price (AED)</label><input id="eo_price" type="number" step="0.01" value="${esc(o.price)}"></div>
+       <div class="fg-field"><label>Commission (AED)</label><input id="eo_comm" type="number" step="0.01" value="${esc(o.commission||0)}"></div>
+     </div>
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">Changing this line reverses the original stock movement and applies the new one. Inventory and reports update automatically.</p>`,
+    ()=>{
+      const sku=(document.getElementById('eo_sku')||{}).value||o.sku;
+      const wh=(document.getElementById('eo_wh')||{}).value||o.wh;
+      const qty=parseInt((document.getElementById('eo_qty')||{}).value)||0;
+      const price=parseFloat((document.getElementById('eo_price')||{}).value);
+      const commission=parseFloat((document.getElementById('eo_comm')||{}).value)||0;
+      if(qty<1){ showFieldError('modalErr','Quantity must be at least 1'); return; }
+      const finalPrice = isNaN(price)? (o.price||0) : price;
+      // Stock validation for a SALE: available if we first give back this line's own qty.
+      if(!isRet){
+        // balance available to this sale = current balance of (sku,wh) + what THIS line currently removes
+        const sameLine = (sku===o.sku && wh===o.wh);
+        const backToPool = sameLine ? o.qty : 0;
+        const avail = balanceQty(sku, wh) + backToPool;
+        if(qty > avail){ showFieldError('modalErr',`Not enough stock: only ${avail} of ${sku} available in ${wh} for this change`); return; }
+      }
+      const patch={ sku, wh, qty, price:finalPrice, commission };
+      if(window.LIVE && typeof liveEditOutward==='function'){
+        const btn=document.getElementById('modalSave'); if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
+        liveEditOutward(id, patch)
+          .then(()=>{ closeModal(); toast('Line updated · '+o.order); renderSalesTab(); })
+          .catch(err=>{ showFieldError('modalErr',(err&&err.message)||'Could not update line'); if(btn){ btn.disabled=false; btn.textContent='Save'; } });
+      } else {
+        // demo mode: update the row in place, then recompute balances
+        o.sku=sku; o.wh=wh; o.qty=qty; o.price=finalPrice; o.commission=commission;
+        const p=prod(sku); if(p&&p.brand) o.brand=p.brand;
+        recomputeStock(); touchUpdated(); closeModal(); toast('Line updated · '+o.order); renderSalesTab();
+      }
+    }, 'Save changes');
 }
 function exportOut(){ const d2=v=>Number(v||0).toFixed(2); downloadCSV('sales_export.csv',[['Order','Channel','SKU','Qty','Price','Value','Commission','Net','Warehouse','Date'],...scopeOutward().map(o=>{const v=o.qty*o.price,cm=orderCommission(o);return [o.order,o.channel,o.sku,o.qty,d2(o.price),d2(v),d2(cm),d2(v-cm),o.wh,o.date];})]); } // FIXED (Issue 2)
 function handleOutwardUpload(input){
@@ -2288,8 +2351,8 @@ function renderTransferTab(){
     ${canT?`<div class="form-grid">
       <div class="fg-field"><label>SKU</label><select id="tr_sku" data-searchable data-ph="Search SKU…">${scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>Quantity</label><input id="tr_qty" type="number" min="1" placeholder="50"></div>
-      <div class="fg-field"><label>From warehouse</label><select id="tr_from" data-searchable data-ph="Search warehouse…">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
-      <div class="fg-field"><label>To warehouse</label><select id="tr_to" data-searchable data-ph="Search warehouse…">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>From warehouse</label><select id="tr_from" data-searchable data-ph="Search warehouse…">${visibleWarehouses().map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>To warehouse</label><select id="tr_to" data-searchable data-ph="Search warehouse…">${visibleWarehouses().map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>Date</label><input id="tr_date" type="date" value="2026-07-07"></div>
       <!-- ADDED: transfer reference for tracking -->
       <div class="fg-field"><label>Reference</label><input id="tr_ref" placeholder="auto if blank e.g. TRF-REF-001"></div>
@@ -2309,8 +2372,8 @@ function renderTransferTab(){
     <!-- ADDED (Issue 3): stock-transfer filters, mirroring sales -->
     <div class="sales-filter-row">
       <input type="text" class="filter-input" placeholder="Search ID, reference, SKU…" value="${esc(tf.q||'')}" data-oninput="setTransferSearch(this.value)">
-      <select class="filter-input" data-onchange="setTransferFrom(this.value)"><option value="">All (from)</option>${WAREHOUSES.map(w=>`<option${tf.from===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
-      <select class="filter-input" data-onchange="setTransferTo(this.value)"><option value="">All (to)</option>${WAREHOUSES.map(w=>`<option${tf.to===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
+      <select class="filter-input" data-onchange="setTransferFrom(this.value)"><option value="">All (from)</option>${visibleWarehouses().map(w=>`<option${tf.from===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
+      <select class="filter-input" data-onchange="setTransferTo(this.value)"><option value="">All (to)</option>${visibleWarehouses().map(w=>`<option${tf.to===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
       <div class="mini-tab">
         <button class="${(tf.group||'flat')==='flat'?'active':''}" data-onclick="setTransferGroup('flat')">List</button>
         <button class="${tf.group==='reference'?'active':''}" data-onclick="setTransferGroup('reference')">By reference</button>
@@ -2685,7 +2748,7 @@ RENDER.reports=function(){
   <div class="card" style="margin-bottom:20px">
     <div class="card-head"><div><h3>SKU profitability by warehouse</h3><div class="ch-sub">Pick a warehouse (and optional dates) to see sales, returns, costs & net profit per SKU</div></div><div class="spacer"></div><button class="btn btn-teal" data-onclick="rptExportCSV()">Export Excel / CSV</button></div>
     <div class="form-grid" style="margin-bottom:12px">
-      <div class="fg-field"><label>Warehouse</label><select id="rpt_wh" data-searchable data-ph="Search warehouse…" data-onchange="rptSetWh(this.value)"><option value="all"${(!RPT.wh||RPT.wh==='all')?' selected':''}>All warehouses</option>${WAREHOUSES.map(w=>`<option${RPT.wh===w?' selected':''}>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Warehouse</label><select id="rpt_wh" data-searchable data-ph="Search warehouse…" data-onchange="rptSetWh(this.value)"><option value="all"${(!RPT.wh||RPT.wh==='all')?' selected':''}>All warehouses</option>${visibleWarehouses().map(w=>`<option${RPT.wh===w?' selected':''}>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>Date from</label><input type="date" id="rpt_from" value="${esc(RPT.from)}" data-onchange="rptSetFrom(this.value)"></div>
       <div class="fg-field"><label>Date to</label><input type="date" id="rpt_to" value="${esc(RPT.to)}" data-onchange="rptSetTo(this.value)"></div>
       <div class="fg-field"><label>Search SKU / product</label><input type="text" id="rpt_q" value="${esc(RPT.q)}" placeholder="Type to filter…" data-oninput="rptSetSearch(this.value)"></div>
@@ -2698,7 +2761,7 @@ RENDER.reports=function(){
     <div class="card-head"><div><h3>Other reports</h3><div class="ch-sub">Pick a report and format</div></div></div>
     <div class="form-grid">
       <div class="fg-field"><label>Report</label><select id="rp_type"><option value="inventory">Inventory snapshot</option><option value="sales">Sales summary</option><option value="inward">Inward register (BOE / PO)</option><option value="pnl">P&L by Month</option></select></div>
-      <div class="fg-field"><label>Warehouse</label><select id="rp_wh" data-searchable data-ph="Search warehouse…"><option value="all">All</option>${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Warehouse</label><select id="rp_wh" data-searchable data-ph="Search warehouse…"><option value="all">All</option>${visibleWarehouses().map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn btn-teal" data-onclick="reportCSV()">Export Excel / CSV</button>
@@ -2988,7 +3051,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'parseCSV','readFileThen','handleInwardUpload','handleOutwardUpload','handleSettlementUpload','parseSettlementReport',
     'deleteInward','deleteOutward','renderInwardGroups','toggleBoe','groupOutwardByWarehouse',
     'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct','inwardUnitCost','stockLineValue',
-    'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
+    'setOutTab','outwardPick','saveOutward','editOutward','exportOut','saveTransfer','orderCommission','exportFin',
     'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter','setSalesWh','setSalesChannel','setSalesSearch','setSalesGroup','setSalesTxn','setSalesSrc','outwardTypeChange','groupOutwardByReference','num2','renderAmazonSync','runAmazonSyncNow',
     'bulkClear','bulkCount','bulkToggle','bulkToggleAll','bulkCheckboxCell','bulkSelectAllCell','bulkBar','bulkClearAndRerender','outwardLinkedReturns','bulkDelete_out','bulkDelete_trf','bulkDelete_inw','_runBulkDeleteOut','_runBulkDeleteTrf','_runBulkDeleteInw','_bulkSyncBar','bulkDelete_prd','_runBulkDeletePrd', // REQ 1: bulk delete + Products
     'applyTransferFilter','setTransferSearch','setTransferFrom','setTransferTo','setTransferGroup','clearTransferFilter','groupTransfersByReference','exportTransfers', // ADDED (Issue 3)
@@ -3002,7 +3065,9 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
     'addChannel','editChannel','removeChannel',
-    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzClientPicked','amzSyncBrandsFromClient','amzDeleteAccount','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
+    'renderAmazonAccountsTable','amzRefresh','amzShowErr','amzAddAccount','amzClientPicked','amzSyncBrandsFromClient','amzRelinkOpen','amzDeleteAccount','amzOpenCreds','amzSaveCreds','amzSyncNow','amzUploadSku', // Amazon Accounts admin (B1+B2)
+    'renderNoonAccountsTable','noonRefresh','noonShowErr','noonAddAccount','noonOpenCreds','noonSaveCreds','noonSetWh','noonSyncNow','noonDeleteAccount','noonClientOptions', // Noon Accounts admin
+
     'subAddOpen','subToggle','subResetPw','clientWhOpen', // Stage 5C: sub-user & warehouse management
     'clientsOnly','isSubUser','subUsersOf', // Stage 5 helpers
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection','balanceQty',
@@ -3354,7 +3419,7 @@ function renderAmazonAccountsTable(){
   const b=document.getElementById('amzAcctBody'); if(!b) return;
   // Respect the top-bar Client filter: show only the selected client's account.
   let list = AMZ_ACCOUNTS;
-  if(clientFilterActive()){ const c=clientFilterUser(); list = AMZ_ACCOUNTS.filter(a=>c && a.name===c.name); }
+  if(clientFilterActive()){ const c=clientFilterUser(); list = AMZ_ACCOUNTS.filter(a=>c && ((a.clientId && String(a.clientId)===String(c.id)) || (!a.clientId && a.name===c.name))); }
   if(!list.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">${clientFilterActive()?'No Amazon account registered for this client yet.':'No Amazon accounts yet. Create one above.'}</p>`; return; }
   b.innerHTML = list.map(a=>{
     const creds = a.credentials_set ? '<span class="pill ok">Credentials set</span>' : '<span class="pill ret">No credentials</span>';
@@ -3366,6 +3431,7 @@ function renderAmazonAccountsTable(){
       <div class="boe-head" style="cursor:default">
         <div><div class="boe-label">ACCOUNT</div><div class="boe-no">${esc(a.name)}</div></div>
         <div class="boe-meta">
+          <div><span>Client</span><b>${(function(){const cl=amzAccountClient(a);return cl?esc(cl.name):'<span style="color:var(--bad)">not linked</span>';})()}</b></div>
           <div><span>Marketplace</span><b class="mono">${esc(a.marketplace_id||'')}</b></div>
           <div><span>Credentials</span><b>${creds}</b></div>
           <div><span>Status</span><b>${active}</b></div>
@@ -3376,6 +3442,7 @@ function renderAmazonAccountsTable(){
         <div style="margin-bottom:10px"><b style="font-size:13px">Brands</b> &nbsp; <span style="font-size:12.5px;color:var(--ink-soft)">${brands}</span>
           <span style="font-size:11.5px;color:var(--ink-soft);display:block;margin-top:2px">Brands come from this client’s assignment (Clients → Edit).</span></div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-ghost" data-onclick="amzRelinkOpen('${esc(a.id)}')">Change client</button>
           <button class="btn btn-ghost" data-onclick="amzSyncBrandsFromClient('${esc(a.id)}')">Sync brands from client</button>
           <button class="btn btn-ghost" data-onclick="amzOpenCreds('${esc(a.id)}')">Save / update credentials</button>
           <label class="btn btn-ghost" style="cursor:pointer;margin:0">Upload SKU map (CSV)
@@ -3403,10 +3470,21 @@ function amzShowErr(m){ const e=document.getElementById('amz_err'); if(e){ e.tex
 function amzClientList(){ return clientsOnly(); }
 // A client's assigned brands (from their profile / user_brands).
 function amzClientBrands(clientId){ const c=amzClientList().find(u=>String(u.id)===String(clientId)); return c?(c.brands||[]).slice():[]; }
+// Resolve an account's client by stable id (fallback to name only if id missing).
+function amzAccountClient(acct){
+  if(!acct) return null;
+  if(acct.clientId){ const byId=amzClientList().find(u=>String(u.id)===String(acct.clientId)); if(byId) return byId; }
+  return amzClientList().find(u=>u.name===acct.name) || null; // legacy fallback
+}
+// Does this client already have an account? (by id, name as legacy fallback)
+function amzClientHasAccount(clientId){
+  const c=amzClientList().find(u=>String(u.id)===String(clientId));
+  return (AMZ_ACCOUNTS||[]).some(a=> (a.clientId && String(a.clientId)===String(clientId)) || (!a.clientId && c && a.name===c.name));
+}
 // Build <option> list for the client picker.
 function amzClientOptions(){
   return amzClientList().map(u=>{
-    const taken = (AMZ_ACCOUNTS||[]).some(a=>a.name===u.name);
+    const taken = amzClientHasAccount(u.id);
     return `<option value="${esc(u.id)}"${taken?' disabled':''}>${esc(u.name)}${taken?' — already registered':''}</option>`;
   }).join('');
 }
@@ -3428,14 +3506,14 @@ function amzAddAccount(){
   if(!client){ amzShowErr('Client not found'); return; }
   const brands=amzClientBrands(clientId);
   if(!brands.length){ amzShowErr('This client has no brands assigned. Assign brands to the client first, then register.'); return; }
-  if((AMZ_ACCOUNTS||[]).some(a=>a.name===client.name)){ amzShowErr('This client already has an Amazon account registered'); return; }
+  if(amzClientHasAccount(clientId)){ amzShowErr('This client already has an Amazon account registered'); return; }
   const e=document.getElementById('amz_err'); if(e) e.style.display='none';
   if(!(window.LIVE && typeof liveAddAmazonAccount==='function')){ toast('Live connection needed'); return; }
-  // Create the account under the client's name, then auto-map exactly the client's brands.
-  liveAddAmazonAccount(client.name, mkt)
+  // Create the account linked to the client by id, then auto-map exactly the client's brands.
+  liveAddAmazonAccount(client.name, mkt, client.id)
     .then(()=>liveLoadAmazonAccounts())
     .then(()=>{
-      const created=(AMZ_ACCOUNTS||[]).find(a=>a.name===client.name);
+      const created=(AMZ_ACCOUNTS||[]).find(a=> (a.clientId && String(a.clientId)===String(client.id)) || a.name===client.name);
       if(!created) throw new Error('Account created but could not be re-read');
       return liveSetAccountBrands(created.id, brands).then(res=>{
         const skipped=(res&&res.skipped)||[];
@@ -3448,14 +3526,33 @@ function amzAddAccount(){
 // Re-pull an existing account's brands from its client (used by the per-account card).
 function amzSyncBrandsFromClient(accountId){
   const acct=(AMZ_ACCOUNTS||[]).find(a=>String(a.id)===String(accountId));
-  const client=acct?amzClientList().find(u=>u.name===acct.name):null;
-  if(!client){ toast('No matching client for this account'); return; }
+  const client=amzAccountClient(acct);
+  if(!client){ toast('This account is not linked to a client. Open it and re-select the client, or re-register it.'); return; }
   const brands=amzClientBrands(client.id);
   if(!brands.length){ toast('That client has no brands assigned'); return; }
   if(!(window.LIVE && typeof liveSetAccountBrands==='function')){ toast('Live connection needed'); return; }
   liveSetAccountBrands(accountId, brands)
     .then(res=>{ const skipped=(res&&res.skipped)||[]; toast('Brands synced from client'+(skipped.length?` · ${skipped.length} skipped (on another account)`:'')); amzRefresh(); })
     .catch(err=>toast((err&&err.message)||'Could not sync brands'));
+}
+// Re-link an account to the correct client by STABLE id (fixes any name mismatch).
+function amzRelinkOpen(accountId){
+  const acct=(AMZ_ACCOUNTS||[]).find(a=>String(a.id)===String(accountId)); if(!acct) return;
+  const cur=amzAccountClient(acct);
+  const opts=amzClientList().map(u=>`<option value="${esc(u.id)}" ${cur&&String(cur.id)===String(u.id)?'selected':''}>${esc(u.name)}</option>`).join('');
+  openModal('Change client · '+acct.name,
+    `<div class="fg-field"><label>Link this Amazon account to client <span class="req">*</span></label>
+      <select id="amz_relink" data-searchable data-ph="Search client…"><option value="">Select a client…</option>${opts}</select></div>
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">This sets the account's client by its stable ID, so syncing no longer depends on names matching. After linking, click “Sync brands from client” to pull that client's brands.</p>`,
+    ()=>{
+      const cid=(document.getElementById('amz_relink')||{}).value||'';
+      if(!cid){ showFieldError('modalErr','Select a client'); return; }
+      if(!(window.LIVE && typeof liveSetAccountClient==='function')){ toast('Live connection needed'); return; }
+      const btn=document.getElementById('modalSave'); if(btn){ btn.disabled=true; btn.textContent='Linking…'; }
+      liveSetAccountClient(accountId, cid)
+        .then(()=>{ closeModal(); toast('Account linked to client'); amzRefresh(); })
+        .catch(err=>{ showFieldError('modalErr',(err&&err.message)||'Could not link'); if(btn){ btn.disabled=false; btn.textContent='Save'; } });
+    }, 'Link client');
 }
 // Delete a registered Amazon account. Frees its brands & warehouses and
 // removes its SKU map; order/transaction history and sync-log history are kept.
@@ -3592,6 +3689,156 @@ function amzUploadSku(accountId, input){
     liveUploadAccountSkuMap(accountId, maps)
       .then(res=>{ toast(`SKU map loaded · ${res.inserted} added${res.skipped?`, ${res.skipped} skipped`:''}`); amzRefresh(); })
       .catch(err=>toast((err&&err.message)||'Could not load SKU map'));
+  });
+}
+
+/* ============================================================
+   ADMIN — NOON ACCOUNTS (Namshi / Noon integration)
+============================================================ */
+let NOON_ACCOUNTS = [];   // [{id,name,clientId,projectCode,active,credentials_set,defaultWh,brands,lastSync}]
+RENDER.noonaccounts=function(){
+  if(!isAdmin()){ go('dashboard'); return; }
+  setHead('Noon Accounts','Each client’s Noon / Namshi seller connection');
+  C.innerHTML=`
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><div><h3>Register a Noon account</h3><div class="ch-sub">Pick a client — Namshi sales sync into their DIP warehouse</div></div></div>
+      <div id="noon_err" class="field-error" style="display:none"></div>
+      <div class="form-grid">
+        <div class="fg-field"><label>Client <span class="req">*</span></label>
+          <select id="noon_client" data-searchable data-ph="Search client…">
+            <option value="">Select a client…</option>${noonClientOptions()}
+          </select>
+        </div>
+        <div class="fg-field"><label>Project code</label><input id="noon_proj" placeholder="e.g. PRJ593213"></div>
+        <div class="fg-field"><label>Sales warehouse (DIP) <span class="req">*</span></label>
+          <select id="noon_wh" data-searchable data-ph="Search warehouse…">
+            <option value="">Select a warehouse…</option>${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-teal" data-onclick="noonAddAccount()">Create account</button>
+    </div>
+    <div class="card">
+      <div class="card-head"><div><h3>Connected Noon accounts</h3><div class="ch-sub">One account per client · credentials, warehouse & last sync</div></div>
+        <div class="spacer"></div><button class="btn btn-ghost" data-onclick="noonRefresh()">Refresh</button></div>
+      <div id="noonAcctBody"><p style="color:var(--ink-soft);font-size:13px;padding:8px 0">Loading accounts…</p></div>
+    </div>`;
+  noonRefresh();
+};
+function noonClientOptions(){
+  return (typeof clientsOnly==='function'?clientsOnly():[]).map(u=>{
+    const taken=(NOON_ACCOUNTS||[]).some(a=>(a.clientId&&String(a.clientId)===String(u.id))||a.name===u.name);
+    return `<option value="${esc(u.id)}"${taken?' disabled':''}>${esc(u.name)}${taken?' — already registered':''}</option>`;
+  }).join('');
+}
+function noonRefresh(){
+  if(window.LIVE && typeof liveLoadNoonAccounts==='function'){
+    const usersP=(typeof liveLoadUsers==='function')?liveLoadUsers().catch(()=>{}):Promise.resolve();
+    usersP.then(()=>liveLoadNoonAccounts()).then(renderNoonAccountsTable).catch(e=>{
+      const b=document.getElementById('noonAcctBody'); if(b) b.innerHTML=`<p style="color:var(--bad);font-size:13px">Could not load: ${esc((e&&e.message)||String(e))}</p>`;
+    });
+  } else { renderNoonAccountsTable(); }
+}
+function noonAccountClient(a){ if(!a) return null; const list=(typeof clientsOnly==='function'?clientsOnly():[]); return (a.clientId?list.find(u=>String(u.id)===String(a.clientId)):null)||list.find(u=>u.name===a.name)||null; }
+function renderNoonAccountsTable(){
+  const b=document.getElementById('noonAcctBody'); if(!b) return;
+  if(!NOON_ACCOUNTS.length){ b.innerHTML=`<p style="color:var(--ink-soft);font-size:13px">No Noon accounts yet. Create one above.</p>`; return; }
+  b.innerHTML = NOON_ACCOUNTS.map(a=>{
+    const creds=a.credentials_set?'<span class="pill ok">Credentials set</span>':'<span class="pill ret">No credentials</span>';
+    const active=a.active?'<span class="pill ok">Active</span>':'<span class="pill over">Inactive</span>';
+    const cl=noonAccountClient(a);
+    const ls=a.lastSync;
+    const lastTxt=ls?`${esc(fmtUpdated?fmtUpdated(ls.ran_at):ls.ran_at)} · ${esc(ls.status)}${(ls.orders!=null)?` · ${ls.orders} orders`:''}`:'<span style="color:var(--ink-soft)">never synced</span>';
+    return `<div class="boe-card" style="margin-bottom:14px">
+      <div class="boe-head" style="cursor:default">
+        <div><div class="boe-label">NOON ACCOUNT</div><div class="boe-no">${esc(a.name)}</div></div>
+        <div class="boe-meta">
+          <div><span>Client</span><b>${cl?esc(cl.name):'<span style="color:var(--bad)">not linked</span>'}</b></div>
+          <div><span>Warehouse</span><b>${a.defaultWh?esc(a.defaultWh):'<span style="color:var(--bad)">none set</span>'}</b></div>
+          <div><span>Credentials</span><b>${creds}</b></div>
+          <div><span>Status</span><b>${active}</b></div>
+          <div><span>Last sync</span><b style="font-size:12px">${lastTxt}</b></div>
+        </div>
+      </div>
+      <div class="po-block">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-ghost" data-onclick="noonOpenCreds('${esc(a.id)}')">Save / update credentials</button>
+          <button class="btn btn-ghost" data-onclick="noonSetWh('${esc(a.id)}')">Set warehouse</button>
+          <button class="btn btn-teal" data-onclick="noonSyncNow('${esc(a.id)}')">Sync now</button>
+          <button class="btn btn-ghost btn-del" data-onclick="noonDeleteAccount('${esc(a.id)}')">Delete account</button>
+        </div>
+        <div id="nooncreds_${esc(a.id)}" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
+          <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Paste the values from your Noon service-account JSON. Encrypted on save, never shown again.</div>
+          <div class="form-grid" style="margin-bottom:8px">
+            <div class="fg-field"><label>key_id</label><input id="nkid_${esc(a.id)}" placeholder="from JSON"></div>
+            <div class="fg-field"><label>client_id (Noon)</label><input id="ncid_${esc(a.id)}" placeholder="from JSON"></div>
+            <div class="fg-field" style="grid-column:1/-1"><label>private_key</label><textarea id="npk_${esc(a.id)}" rows="4" placeholder="-----BEGIN PRIVATE KEY-----&#10;…" style="width:100%;font-family:monospace;font-size:11px"></textarea></div>
+          </div>
+          <button class="btn btn-teal" data-onclick="noonSaveCreds('${esc(a.id)}')">Encrypt & save</button>
+          <button class="btn btn-ghost" data-onclick="noonOpenCreds('${esc(a.id)}')">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') + `<p style="color:var(--ink-soft);font-size:12px;margin-top:4px">Credentials are stored encrypted and never displayed. Namshi sales import into the account’s warehouse as the “Namshi” channel.</p>`;
+}
+// ---- actions ----
+function noonShowErr(m){ const e=document.getElementById('noon_err'); if(e){ e.textContent=m; e.style.display='block'; } else toast(m); }
+function noonAddAccount(){
+  const clientId=(document.getElementById('noon_client')||{}).value||'';
+  const proj=(document.getElementById('noon_proj')||{}).value.trim();
+  const wh=(document.getElementById('noon_wh')||{}).value||'';
+  if(!clientId){ noonShowErr('Select a client'); return; }
+  if(!wh){ noonShowErr('Select the sales (DIP) warehouse'); return; }
+  const client=(typeof clientsOnly==='function'?clientsOnly():[]).find(u=>String(u.id)===String(clientId));
+  if(!client){ noonShowErr('Client not found'); return; }
+  if((NOON_ACCOUNTS||[]).some(a=>(a.clientId&&String(a.clientId)===String(clientId))||a.name===client.name)){ noonShowErr('This client already has a Noon account'); return; }
+  if(!(window.LIVE && typeof liveAddNoonAccount==='function')){ toast('Live connection needed'); return; }
+  liveAddNoonAccount(client.name, client.id, proj, wh)
+    .then(()=>{ toast('Noon account created · '+client.name); const s=document.getElementById('noon_client'); if(s)s.value=''; noonRefresh(); })
+    .catch(err=>noonShowErr((err&&err.message)||'Could not create account'));
+}
+function noonOpenCreds(id){ const box=document.getElementById('nooncreds_'+id); if(box) box.style.display=(box.style.display==='none'?'block':'none'); }
+function noonSaveCreds(id){
+  const keyId=(document.getElementById('nkid_'+id)||{}).value.trim();
+  const clientId=(document.getElementById('ncid_'+id)||{}).value.trim();
+  const pk=(document.getElementById('npk_'+id)||{}).value.trim();
+  if(!keyId||!pk){ toast('key_id and private_key are required'); return; }
+  if(!(window.LIVE && typeof liveSaveNoonCreds==='function')){ toast('Live connection needed'); return; }
+  liveSaveNoonCreds(id, keyId, pk, clientId)
+    .then(()=>{ toast('Credentials saved (encrypted)'); noonRefresh(); })
+    .catch(err=>toast((err&&err.message)||'Could not save credentials'));
+}
+function noonSetWh(id){
+  const a=(NOON_ACCOUNTS||[]).find(x=>String(x.id)===String(id)); if(!a) return;
+  const opts=WAREHOUSES.map(w=>`<option ${a.defaultWh===w?'selected':''}>${esc(w)}</option>`).join('');
+  openModal('Sales warehouse · '+a.name,
+    `<div class="fg-field"><label>Warehouse Namshi sales deduct from <span class="req">*</span></label>
+      <select id="noonwh_sel" data-searchable data-ph="Search warehouse…"><option value="">Select…</option>${opts}</select></div>
+     <p style="font-size:11.5px;color:var(--ink-soft);margin-top:6px">FBP (own-stock) sales fetch from this client’s DIP warehouse.</p>`,
+    ()=>{
+      const wh=(document.getElementById('noonwh_sel')||{}).value||'';
+      if(!wh){ showFieldError('modalErr','Select a warehouse'); return; }
+      if(!(window.LIVE && typeof liveSetNoonWarehouse==='function')){ toast('Live connection needed'); return; }
+      liveSetNoonWarehouse(id, wh).then(()=>{ closeModal(); toast('Warehouse set'); noonRefresh(); })
+        .catch(err=>showFieldError('modalErr',(err&&err.message)||'Could not set warehouse'));
+    }, 'Save');
+}
+function noonSyncNow(id){
+  const a=(NOON_ACCOUNTS||[]).find(x=>String(x.id)===String(id)); if(!a) return;
+  if(!a.credentials_set){ toast('Save credentials first'); return; }
+  if(!a.defaultWh){ toast('Set the sales warehouse first'); return; }
+  if(!(window.LIVE && typeof liveSyncNoonNow==='function')){ toast('Live connection needed'); return; }
+  toast('Syncing Noon · '+a.name+'…');
+  liveSyncNoonNow(id)
+    .then(res=>{ const r=(res&&res.results&&res.results[0])||{}; toast(`Noon sync done · ${r.orders||0} imported${r.skipped?`, ${r.skipped} skipped`:''}`); noonRefresh(); })
+    .catch(err=>toast((err&&err.message)||'Sync failed'));
+}
+function noonDeleteAccount(id){
+  const a=(NOON_ACCOUNTS||[]).find(x=>String(x.id)===String(id)); if(!a) return;
+  confirmAction(`Delete the Noon account "${a.name}"?\n\nThis removes the connection and its credentials. It does NOT delete any imported sales or history. This cannot be undone.`, ()=>{
+    if(!(window.LIVE && typeof liveDeleteNoonAccount==='function')){ toast('Live connection needed'); return; }
+    liveDeleteNoonAccount(id).then(()=>{ toast('Account deleted · '+a.name); noonRefresh(); })
+      .catch(err=>toast((err&&err.message)||'Could not delete'));
   });
 }
 
@@ -4314,7 +4561,7 @@ let OUTWARD_ID = {}; // our display id -> db id
 async function liveLoadAmazonAccounts(){
   if(!LIVE) return AMZ_ACCOUNTS;
   const { data: accts, error } = await sb.from('amazon_accounts')
-    .select('id,name,marketplace_id,active,credentials_set').order('name');
+    .select('id,name,marketplace_id,active,credentials_set,client_id').order('name');
   if(error) throw error;
   // brand links (+ brand names)
   const { data: links } = await sb.from('account_brands').select('account_id, brands(name)');
@@ -4327,17 +4574,25 @@ async function liveLoadAmazonAccounts(){
   (logs||[]).forEach(r=>{ if(r.account_id && !lastByAcct[r.account_id]) lastByAcct[r.account_id]=r; });
   AMZ_ACCOUNTS = (accts||[]).map(a=>({
     id:a.id, name:a.name, marketplace_id:a.marketplace_id, active:a.active,
-    credentials_set:a.credentials_set,
+    credentials_set:a.credentials_set, clientId:a.client_id||null,
     brands:(byAcct[a.id]||[]).sort(),
     lastSync:lastByAcct[a.id]||null
   }));
   return AMZ_ACCOUNTS;
 }
 
-// ADMIN: create a new Amazon account row.
-async function liveAddAmazonAccount(name, marketplaceId){
-  const { error } = await sb.from('amazon_accounts').insert({ name, marketplace_id: marketplaceId||'A2VIGQ35RCS4UG', region:'eu', active:true });
+// ADMIN: create a new Amazon account row, linked to a client by stable id.
+async function liveAddAmazonAccount(name, marketplaceId, clientId){
+  const row = { name, marketplace_id: marketplaceId||'A2VIGQ35RCS4UG', region:'eu', active:true };
+  if(clientId) row.client_id = clientId;
+  const { error } = await sb.from('amazon_accounts').insert(row);
   if(error) throw error;
+}
+// ADMIN: (re)link an Amazon account to a client by stable id.
+async function liveSetAccountClient(accountId, clientId){
+  const { error } = await sb.from('amazon_accounts').update({ client_id: clientId }).eq('id', accountId);
+  if(error) throw error;
+  await liveLoadAmazonAccounts();
 }
 // ADMIN: set an account's brands (replace the set). A brand belongs to one account.
 // Brands already linked to a DIFFERENT account are skipped (not stolen) and
@@ -4384,6 +4639,61 @@ async function liveSyncAccountNow(accountId){
   if(error) throw new Error(error.message||'sync failed');
   if(data && data.ok===false) throw new Error(data.error||'Sync failed');
   return data;
+}
+
+/* ---------- NOON account live functions ---------- */
+async function liveLoadNoonAccounts(){
+  if(!LIVE) return NOON_ACCOUNTS;
+  const { data: accts, error } = await sb.from('noon_accounts')
+    .select('id,name,client_id,project_code,active,credentials_set,default_warehouse_id').order('name');
+  if(error) throw error;
+  // resolve warehouse names
+  const whIds=[...new Set((accts||[]).map(a=>a.default_warehouse_id).filter(Boolean))];
+  let whName={};
+  if(whIds.length){ const { data: whs } = await sb.from('warehouses').select('id,name').in('id', whIds); (whs||[]).forEach(w=>whName[w.id]=w.name); }
+  // latest sync per account
+  const { data: logs } = await sb.from('noon_sync_log').select('account_id,status,orders,ran_at').order('ran_at',{ascending:false}).limit(200);
+  const lastByAcct={}; (logs||[]).forEach(r=>{ if(r.account_id && !lastByAcct[r.account_id]) lastByAcct[r.account_id]=r; });
+  NOON_ACCOUNTS=(accts||[]).map(a=>({
+    id:a.id, name:a.name, clientId:a.client_id||null, projectCode:a.project_code||'',
+    active:a.active, credentials_set:a.credentials_set,
+    defaultWh:a.default_warehouse_id?whName[a.default_warehouse_id]||null:null,
+    lastSync:lastByAcct[a.id]||null
+  }));
+  return NOON_ACCOUNTS;
+}
+async function liveAddNoonAccount(name, clientId, projectCode, warehouseName){
+  const whId = warehouseName ? WH_ID[warehouseName] : null;
+  const row = { name, active:true };
+  if(clientId) row.client_id=clientId;
+  if(projectCode) row.project_code=projectCode;
+  if(whId) row.default_warehouse_id=whId;
+  const { error } = await sb.from('noon_accounts').insert(row);
+  if(error) throw error;
+}
+async function liveSetNoonWarehouse(accountId, warehouseName){
+  const whId = WH_ID[warehouseName]; if(!whId) throw new Error('Warehouse not found');
+  const { error } = await sb.from('noon_accounts').update({ default_warehouse_id:whId }).eq('id', accountId);
+  if(error) throw error; await liveLoadNoonAccounts();
+}
+// save Noon service-account creds (encrypted) via the noon-sync function's 'save' action.
+async function liveSaveNoonCreds(accountId, keyId, privateKey, clientId){
+  const { data, error } = await sb.functions.invoke('noon-sync', {
+    body: { action:'save', account_id:accountId, key_id:keyId, private_key:privateKey, client_id:clientId||'' }
+  });
+  if(error) throw new Error(error.message||'save failed');
+  if(data && data.ok===false) throw new Error(data.error||'Save failed');
+  await liveLoadNoonAccounts();
+}
+async function liveSyncNoonNow(accountId){
+  const { data, error } = await sb.functions.invoke('noon-sync', { body: { action:'sync', account_id:accountId, days:30 } });
+  if(error) throw new Error(error.message||'sync failed');
+  if(data && data.ok===false) throw new Error(data.error||'Sync failed');
+  return data;
+}
+async function liveDeleteNoonAccount(accountId){
+  const { error } = await sb.from('noon_accounts').delete().eq('id', accountId);
+  if(error) throw error;
 }
 // ADMIN: load an account's SKU map (Amazon seller-SKU -> internal product), scoped to the account.
 async function liveUploadAccountSkuMap(accountId, maps){
@@ -4479,6 +4789,19 @@ async function liveLoadClientWarehouses(){
   }catch(e){ /* keep empty on failure */ }
   return CLIENT_WH;
 }
+// Load MY_WH — the warehouse names for a logged-in CLIENT/sub-user's own client.
+// A sub-user inherits its parent client's warehouses (effective client).
+async function liveLoadMyWarehouses(){
+  MY_WH = null;
+  if(!LIVE || !CURRENT || isAdmin()) return MY_WH;
+  try{
+    const effClientId = CURRENT.parentId || CURRENT.id;   // sub-user -> parent; client -> itself
+    const { data: links } = await sb.from('client_warehouses')
+      .select('warehouses(name)').eq('profile_id', effClientId);
+    MY_WH = (links||[]).map(l=>l.warehouses?l.warehouses.name:null).filter(Boolean);
+  }catch(e){ MY_WH = []; }
+  return MY_WH;
+}
 // Replace a client's warehouse set. A warehouse belongs to one client only.
 // A chosen warehouse currently owned by ANOTHER client is MOVED to this client
 // (its old link is removed first). Returns {moved} = how many came from another client.
@@ -4533,6 +4856,7 @@ async function liveLogin(email, password){
   CURRENT = {
     id: profile.id, name: profile.name, email: profile.email,
     role: profile.role==='admin' ? 'admin' : 'brand',
+    parentId: profile.parent_id || null, subRole: profile.sub_role || null,
     brands: [], active: profile.active, mustReset: profile.must_reset_password,
     logo: profile.logo_url || ''   // FIXED (Issue 4): carry the partner logo into the session
   };
@@ -4541,6 +4865,7 @@ async function liveLogin(email, password){
   const { data: brands } = await sb.from('brands').select('*');
   BRAND_NAME={}; (brands||[]).forEach(b=>BRAND_NAME[b.id]=b.name);
   CURRENT.brands = (profile.user_brands||[]).map(x=>BRAND_NAME[x.brand_id]).filter(Boolean);
+  await liveLoadMyWarehouses();   // issue 1: this user's own warehouse scope
   return CURRENT;
 }
 async function liveSetPassword(newPass){
@@ -4562,6 +4887,7 @@ async function liveRestoreSession(){
   CURRENT = {
     id: profile.id, name: profile.name, email: profile.email,
     role: profile.role==='admin' ? 'admin' : 'brand',
+    parentId: profile.parent_id || null, subRole: profile.sub_role || null,
     brands: [], active: profile.active, mustReset: profile.must_reset_password,
     logo: profile.logo_url || ''   // FIXED (Issue 4)
   };
@@ -4569,6 +4895,7 @@ async function liveRestoreSession(){
   const { data: brands } = await sb.from('brands').select('*');
   BRAND_NAME={}; (brands||[]).forEach(b=>BRAND_NAME[b.id]=b.name);
   CURRENT.brands = (profile.user_brands||[]).map(x=>BRAND_NAME[x.brand_id]).filter(Boolean);
+  await liveLoadMyWarehouses();   // issue 1: this user's own warehouse scope
   return CURRENT;
 }
 
@@ -4701,6 +5028,21 @@ async function liveAddOutward(o){
   if (error) throw error; await liveLoadAll();
 }
 async function liveDeleteOutward(dispId){ const id=OUTWARD_ID[dispId]||dispId; const { error } = await sb.from('outward').delete().eq('id', id); if(error) throw error; await liveLoadAll(); }
+// Issue 2: edit a single outward line item. Updates the DB row in place; the
+// stock_movements trigger reverses the old movement and applies the new one,
+// so inventory, cost and profit recompute automatically (no duplicate row).
+async function liveEditOutward(dispId, patchIn){
+  const id=OUTWARD_ID[dispId]||dispId;
+  const patch={};
+  if(patchIn.sku!=null)   patch.product_id   = resolveProdId(patchIn.sku);
+  if(patchIn.wh!=null)    patch.warehouse_id = resolveWhId(patchIn.wh);
+  if(patchIn.qty!=null)   patch.qty          = patchIn.qty;
+  if(patchIn.price!=null) patch.selling_price= patchIn.price;
+  if(patchIn.commission!=null) patch.commission = patchIn.commission;
+  const { error } = await sb.from('outward').update(patch).eq('id', id);
+  if(error) throw error;
+  await liveLoadAll();
+}
 // REQ 3: persist a return's disposition (sellable | damaged | unsellable) + audit, then reload.
 async function liveSetDisposition(dispId, disposition){
   const id=OUTWARD_ID[dispId]||dispId;
